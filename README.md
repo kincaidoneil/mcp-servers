@@ -55,18 +55,18 @@ Revocation primitive: **rotate `JWT_SIGNING_KEY` env var in Vercel** → all tok
 3. **Build settings** → leave defaults (Next.js detected automatically).
 4. **Environment Variables** → set:
 
-   | Name                           | Value                                                                                           |
-   | ------------------------------ | ----------------------------------------------------------------------------------------------- |
-   | `PUBLIC_BASE_URL`              | `https://<your-vercel-domain>/notion` (no trailing slash)                                       |
-   | `JWT_SIGNING_KEY`              | Output of `openssl rand -base64 32`                                                             |
-   | `NOTION_OAUTH_CLIENT_ID`       | From step 1                                                                                     |
-   | `NOTION_OAUTH_CLIENT_SECRET`   | From step 1                                                                                     |
-   | `ALLOWED_NOTION_EMAILS`        | Comma-separated emails (preferred)                                                              |
-   | `ALLOWED_NOTION_WORKSPACE_IDS` | Comma-separated workspace UUIDs (optional fallback if the integration capability isn't enabled) |
+   | Name                           | Value                                                                                                                            |
+   | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+   | `PUBLIC_BASE_URL`              | Apex URL of this deployment (no path, no trailing slash). E.g. `https://mcp.example.com`. Shared across all bridges in this repo |
+   | `JWT_SIGNING_KEY`              | Output of `openssl rand -base64 32`                                                                                              |
+   | `NOTION_OAUTH_CLIENT_ID`       | From step 1                                                                                                                      |
+   | `NOTION_OAUTH_CLIENT_SECRET`   | From step 1                                                                                                                      |
+   | `ALLOWED_NOTION_EMAILS`        | Comma-separated emails (preferred)                                                                                               |
+   | `ALLOWED_NOTION_WORKSPACE_IDS` | Comma-separated workspace UUIDs (optional fallback if the integration capability isn't enabled)                                  |
 
 5. Deploy.
-6. Optionally attach a custom domain (e.g. `mcp.example.com`) — update `PUBLIC_BASE_URL` to match.
-7. Go back to your Notion integration and add the **final** redirect URI: `<PUBLIC_BASE_URL>/oauth/notion-callback`.
+6. Optionally attach a custom domain (e.g. `mcp.example.com`) — update `PUBLIC_BASE_URL` to match the apex.
+7. Go back to your Notion integration and add the **final** redirect URI: `<PUBLIC_BASE_URL>/notion/oauth/notion-callback`.
 
 ### 3. Add to Claude.ai
 
@@ -111,6 +111,8 @@ OAuth flow can be exercised locally using the `mcp-cli` or `@modelcontextprotoco
 Each bridge lives under `app/<name>/` with its own MCP route at `app/<name>/route.ts` and OAuth endpoints at `app/<name>/oauth/*`. Reuse [`lib/oauth-as/`](./lib/oauth-as/) — the AS layer is upstream-agnostic. The Notion bridge under [`app/notion/`](./app/notion/) is the reference implementation.
 
 Bridge-specific code (tools, upstream client, identity extraction) lives in `app/<name>/_internal/`. Next.js skips folders prefixed `_` for routing, so they live alongside the route handlers without being exposed.
+
+`PUBLIC_BASE_URL` is the **apex** URL of the deployment (e.g. `https://mcp.example.com`); each bridge's `_internal/config.ts` declares its own `BRIDGE_PATH` constant (`/notion`, `/strava`, etc.) and appends it. Adding a bridge does not require new env vars for the host.
 
 ---
 
