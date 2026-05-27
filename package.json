@@ -5,17 +5,32 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "test": "vitest run --passWithNoTests",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "@notionhq/client": "5.22.0",
+    "jose": "6.2.3",
+    "mcp-handler": "1.1.0",
     "next": "16.2.6",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^20",
+    "@types/node": "^25.9.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "typescript": "^5"
+    "msw": "2.14.6",
+    "oxfmt": "0.52.0",
+    "oxlint": "1.67.0",
+    "typescript": "^5",
+    "vitest": "4.1.7"
   }
 }
