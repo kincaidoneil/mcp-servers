@@ -125,5 +125,17 @@ This bridge is designed for a **single human operator (the person running the de
 - **Allowlist enforced on Notion callback.** Random Claude.ai users who manage to discover the URL and start an OAuth flow are rejected with a 403 once Notion returns their workspace info; they never receive an access token from this bridge.
 - **PKCE required.** No `client_secret` is issued for DCR clients (`token_endpoint_auth_method: "none"`); PKCE binds the auth code to the original authorize request.
 - **Redirect URIs are validated.** During `/authorize`, the `redirect_uri` must be one that was registered via DCR. During `/token`, the `redirect_uri` must match the one used in the auth code.
+- **Consent screen interrupts every OAuth flow.** Before forwarding to Notion, `/oauth/authorize` renders a server-side consent page that prominently displays the registrable domain (eTLD+1) the authorization code would be sent to. Even if you click a phisher's crafted authorize URL, you get a chance to verify the domain before reaching Notion's screen. The DCR-self-reported `client_name` is deliberately not shown — only the cryptographically-bound redirect URI is.
+- **Punycode redirect URIs are rejected.** Internationalized domains (`xn--*`, or any Unicode hostname that Node normalizes to Punycode) are refused at DCR time. This fails closed against IDN homograph attacks like `clаude.ai` (Cyrillic а). If you actually need to use this with an IDN destination one day, remove the check in `lib/oauth-as/register.ts` and add a visible Punycode warning on the consent screen instead.
 
 Inappropriate for: multi-tenant SaaS, hosting at scale, anything where you don't control the deploy.
+
+### OAuth phishing — the inherent risk to know about
+
+DCR (Dynamic Client Registration) lets any party self-register a `client_id` and pick any `redirect_uri`. An attacker can craft an `/oauth/authorize?client_id=...&redirect_uri=https://attacker.com/cb` URL and send it to you. If you click it AND click "Allow" on Notion's screen, the authorization code goes to the attacker — same pattern as every OAuth phishing attack. Mitigations in this bridge:
+
+1. The consent screen showing the registrable domain (see above) — your last chance to notice before the upstream consent.
+2. Punycode rejection — homograph variants of trusted domains can't even register.
+3. The workspace allowlist — limits blast radius to workspaces you've already authorized.
+
+None of these prevent you from authorizing a hostile request you actively confirm. The usual OAuth-hygiene rule applies: don't click `oauth/authorize?...` URLs from untrusted sources.
