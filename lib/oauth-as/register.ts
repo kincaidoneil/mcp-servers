@@ -50,13 +50,11 @@ export async function registerClient(
   const { client_name, redirect_uris } = parsed.data;
 
   for (const uri of redirect_uris) {
-    if (!isAcceptableRedirectUri(uri)) {
+    const rejection = rejectRedirectUri(uri);
+    if (rejection) {
       return {
         ok: false,
-        error: {
-          error: "invalid_redirect_uri",
-          error_description: `redirect_uri must use https (or http on localhost): ${uri}`,
-        },
+        error: { error: "invalid_redirect_uri", error_description: rejection },
       };
     }
   }
@@ -83,18 +81,33 @@ export async function registerClient(
   };
 }
 
-function isAcceptableRedirectUri(uri: string): boolean {
+// Returns null if accepted, or a human-readable rejection reason.
+//
+// The Punycode (`xn--*`) reject is a deliberate fail-closed: we don't expect
+// to use this bridge with any internationalized domain, and IDN/homograph
+// attacks on the consent screen are a real DCR phishing vector. If you do
+// want to support an IDN destination one day, remove the xn-- check and add
+// a visible warning on the consent screen instead.
+function rejectRedirectUri(uri: string): string | null {
   let parsed: URL;
   try {
     parsed = new URL(uri);
   } catch {
-    return false;
+    return `redirect_uri is not a valid URL: ${uri}`;
   }
-  if (parsed.protocol === "https:") return true;
-  if (
-    parsed.protocol === "http:" &&
-    (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
-  )
-    return true;
-  return false;
+  const hostname = parsed.hostname.toLowerCase();
+  if (parsed.protocol === "https:") {
+    if (containsPunycodeLabel(hostname)) {
+      return `redirect_uri uses an internationalized (Punycode) domain, which this bridge rejects: ${uri}`;
+    }
+    return null;
+  }
+  if (parsed.protocol === "http:" && (hostname === "localhost" || hostname === "127.0.0.1")) {
+    return null;
+  }
+  return `redirect_uri must use https (or http on localhost): ${uri}`;
+}
+
+function containsPunycodeLabel(hostname: string): boolean {
+  return hostname.split(".").some((label) => label.startsWith("xn--"));
 }

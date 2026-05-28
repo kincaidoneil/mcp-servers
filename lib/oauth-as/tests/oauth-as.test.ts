@@ -266,6 +266,35 @@ describe("OAuth AS — full integration", () => {
     if (!result.ok) expect(result.error.error).toBe("invalid_redirect_uri");
   });
 
+  test("DCR rejects Punycode redirect_uris (homograph defense)", async () => {
+    const result = await registerClient(
+      { client_name: "Test", redirect_uris: ["https://xn--clude-7we.ai/cb"] },
+      config,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.error).toBe("invalid_redirect_uri");
+  });
+
+  test("DCR rejects Punycode in a subdomain too", async () => {
+    const result = await registerClient(
+      { client_name: "Test", redirect_uris: ["https://xn--clude-7we.example.com/cb"] },
+      config,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.error).toBe("invalid_redirect_uri");
+  });
+
+  test("DCR Punycode-normalizes Unicode input and rejects", async () => {
+    // `clаude.ai` with a Cyrillic 'а' — new URL() will Punycode-normalize the
+    // hostname, and our check sees an xn-- label.
+    const result = await registerClient(
+      { client_name: "Test", redirect_uris: ["https://clаude.ai/cb"] },
+      config,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.error).toBe("invalid_redirect_uri");
+  });
+
   test("DCR accepts http://localhost redirect_uri", async () => {
     const result = await registerClient(
       { client_name: "Test", redirect_uris: ["http://localhost:8080/cb"] },
