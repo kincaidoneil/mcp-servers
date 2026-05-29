@@ -1,19 +1,20 @@
 import { IBM_Plex_Serif, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+import "./globals.css";
 
 const serif = IBM_Plex_Serif({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
-  variable: "--font-serif",
+  variable: "--font-plex-serif",
 });
 const sans = IBM_Plex_Sans({
   subsets: ["latin"],
   weight: ["400", "500", "600"],
-  variable: "--font-sans",
+  variable: "--font-plex-sans",
 });
 const mono = IBM_Plex_Mono({
   subsets: ["latin"],
   weight: ["400", "500"],
-  variable: "--font-mono",
+  variable: "--font-plex-mono",
 });
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
