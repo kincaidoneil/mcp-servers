@@ -1,0 +1,19 @@
+@import "tailwindcss";
+
+/* Warm paper palette + Plex typography stack. Shared design tokens for any
+ * user-facing UI in this app (currently the OAuth consent screen). */
+@theme {
+  --color-paper: #f5f1ea;
+  --color-paper-deep: #ebe5d9;
+  --color-ink: #1f1a14;
+  --color-ink-soft: #6b5f54;
+  --color-rust: #b6411a;
+  --color-rust-soft: #d99b80;
+  --color-moss: #4a5d23;
+
+  /* Bind Tailwind's font utilities to the next/font CSS variables set on
+   * <html> by app/layout.tsx. */
+  --font-sans: var(--font-plex-sans), system-ui, sans-serif;
+  --font-serif: var(--font-plex-serif), Georgia, serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}

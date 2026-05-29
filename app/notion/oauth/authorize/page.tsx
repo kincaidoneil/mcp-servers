@@ -3,7 +3,6 @@ import { getDomain } from "tldts";
 import { validateAuthorize } from "@/lib/oauth-as";
 import { getConfig } from "../../_internal/config";
 import { buildNotionAuthorizeUrl } from "../../_internal/notion-oauth";
-import styles from "./consent.module.css";
 
 type SearchParams = Promise<{ [k: string]: string | string[] | undefined }>;
 
@@ -40,8 +39,8 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
     );
   }
 
-  // Defense in depth: even if a pre-rejection client_id slipped through DCR,
-  // also block here.
+  // Defense in depth: even if a Punycode redirect_uri slipped past DCR, also
+  // block here.
   const parsed = new URL(result.clientRedirectUri);
   const hostname = parsed.hostname.toLowerCase();
   if (hostname.split(".").some((label) => label.startsWith("xn--"))) {
@@ -63,44 +62,62 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
   const registrableDomain = getDomain(hostname) ?? hostname;
 
   return (
-    <main className={styles.main}>
-      <article className={styles.card}>
-        <header className={styles.header}>
-          <p className={styles.eyebrow}>Authorize OAuth access</p>
-          <h1 className={styles.title}>
-            Send Notion data to <span className={styles.domainInline}>{registrableDomain}</span>?
-          </h1>
-        </header>
+    <Shell>
+      <header className="mb-8">
+        <p className="mb-3 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
+          Authorize OAuth access
+        </p>
+        <h1 className="font-serif text-3xl leading-tight font-medium tracking-tight text-ink">
+          Send Notion data to{" "}
+          <span className="font-serif italic text-rust">{registrableDomain}</span>?
+        </h1>
+      </header>
 
-        <section className={styles.domainBlock}>
-          <p className={styles.domainBlockLabel}>Authorization code will be sent to</p>
-          <p className={styles.domain}>{registrableDomain}</p>
-          <p className={styles.urlLabel}>Full redirect URI:</p>
-          <code className={styles.url}>{result.clientRedirectUri}</code>
-        </section>
+      <section className="mb-7 rounded-sm border-l-[3px] border-rust bg-paper-deep px-6 pt-6 pb-5">
+        <p className="mb-2 font-mono text-[11px] tracking-[0.12em] uppercase text-ink-soft">
+          Authorization code will be sent to
+        </p>
+        <p className="mb-5 font-serif text-[32px] leading-[1.1] font-medium tracking-tight break-all text-ink">
+          {registrableDomain}
+        </p>
+        <p className="mb-1.5 font-mono text-[11px] tracking-[0.12em] uppercase text-ink-soft">
+          Full redirect URI:
+        </p>
+        <code className="block font-mono text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink">
+          {result.clientRedirectUri}
+        </code>
+      </section>
 
-        <section className={styles.warning}>
-          <strong>Verify the domain before continuing.</strong> Anyone can start an OAuth flow
-          against this bridge — only the domain above is bound to where your authorization code will
-          end up. If you didn&rsquo;t start this on <code>{registrableDomain}</code>, cancel.
-        </section>
+      <section className="mb-8 text-sm leading-relaxed text-ink">
+        <strong className="font-semibold text-rust">Verify the domain before continuing.</strong>{" "}
+        Anyone can start an OAuth flow against this bridge — only the domain above is bound to where
+        your authorization code will end up. If you didn&rsquo;t start this on{" "}
+        <code className="rounded-sm bg-paper-deep px-1.5 py-px font-mono text-[13px]">
+          {registrableDomain}
+        </code>
+        , cancel.
+      </section>
 
-        <section className={styles.actions}>
-          <a className={styles.continueButton} href={notionUrl}>
-            Continue to Notion
-          </a>
-          <a className={styles.cancelButton} href={cancelUrl}>
-            Cancel
-          </a>
-        </section>
+      <section className="mb-7 flex items-center gap-4">
+        <a
+          href={notionUrl}
+          className="inline-flex items-center justify-center rounded-sm border border-ink bg-ink px-6 py-3 font-sans text-[15px] font-medium tracking-[0.01em] text-paper transition-colors duration-100 hover:border-rust hover:bg-rust"
+        >
+          Continue to Notion
+        </a>
+        <a
+          href={cancelUrl}
+          className="font-sans text-[15px] font-medium text-ink-soft underline decoration-1 underline-offset-4 hover:text-ink"
+        >
+          Cancel
+        </a>
+      </section>
 
-        <footer className={styles.footer}>
-          Clicking Continue sends you to Notion&rsquo;s standard consent screen. Notion then
-          redirects back through this bridge, which sends the authorization code to the domain
-          above.
-        </footer>
-      </article>
-    </main>
+      <footer className="border-t border-ink/8 pt-6 text-[13px] leading-relaxed text-ink-soft">
+        Clicking Continue sends you to Notion&rsquo;s standard consent screen. Notion then redirects
+        back through this bridge, which sends the authorization code to the domain above.
+      </footer>
+    </Shell>
   );
 }
 
@@ -114,13 +131,31 @@ function ErrorScreen({
   description: string;
 }) {
   return (
-    <main className={styles.main}>
-      <article className={styles.card}>
-        <header className={styles.header}>
-          <p className={styles.eyebrow}>{error}</p>
-          <h1 className={styles.title}>{title}</h1>
-        </header>
-        <p className={styles.errorBody}>{description}</p>
+    <Shell>
+      <header className="mb-8">
+        <p className="mb-3 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
+          {error}
+        </p>
+        <h1 className="font-serif text-3xl leading-tight font-medium tracking-tight text-ink">
+          {title}
+        </h1>
+      </header>
+      <p className="text-[15px] leading-relaxed text-ink">{description}</p>
+    </Shell>
+  );
+}
+
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <main
+      className="grid min-h-screen place-items-center bg-paper px-6 py-12 font-sans text-ink"
+      style={{
+        backgroundImage:
+          "radial-gradient(circle at 12% 18%, rgba(182, 65, 26, 0.04), transparent 35%), radial-gradient(circle at 88% 82%, rgba(74, 93, 35, 0.05), transparent 40%)",
+      }}
+    >
+      <article className="w-full max-w-[560px] rounded border border-ink/10 bg-paper px-11 py-10 shadow-[0_1px_0_rgba(31,26,20,0.04),0_24px_48px_-24px_rgba(31,26,20,0.18)]">
+        {children}
       </article>
     </main>
   );
