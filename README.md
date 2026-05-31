@@ -1,4 +1,4 @@
-# mcp-bridge
+# mcp-servers
 
 > Personal, self-hosted MCP servers
 
@@ -17,19 +17,19 @@ The official Notion MCP gates its database query tools behind Business plans. Th
 
 1. [Create a Notion integration](https://www.notion.so/profile/integrations) (Public). Enable capabilities **Read content** and **User information including email addresses**. Add redirect URI `<PUBLIC_BASE_URL>/notion/oauth/notion-callback`. Then on the deployment, set:
 
-| Env var                        | Value                                          |
-| ------------------------------ | ---------------------------------------------- |
-| `NOTION_OAUTH_CLIENT_ID`       | From the integration                           |
-| `NOTION_OAUTH_CLIENT_SECRET`   | From the integration                           |
+| Env var                        | Value                                              |
+| ------------------------------ | -------------------------------------------------- |
+| `NOTION_OAUTH_CLIENT_ID`       | From the integration                               |
+| `NOTION_OAUTH_CLIENT_SECRET`   | From the integration                               |
 | `ALLOWED_NOTION_EMAILS`        | Comma-separated workspace-owner emails (preferred) |
-| `ALLOWED_NOTION_WORKSPACE_IDS` | Comma-separated workspace UUIDs (fallback)     |
+| `ALLOWED_NOTION_WORKSPACE_IDS` | Comma-separated workspace UUIDs (fallback)         |
 
 2. **Connect the MCP.** Add `<PUBLIC_BASE_URL>/notion` to the agent, e.g. Claude.ai. Walk through OAuth, pick an account, and connect.
 
 ## Architecture
 
 ```
-Claude.ai / ChatGPT ── DCR + OAuth 2.1 + PKCE ──▶ mcp-bridge (Vercel) ── upstream OAuth ──▶ service
+Claude.ai / ChatGPT ── DCR + OAuth 2.1 + PKCE ──▶ mcp-servers (Vercel) ── upstream OAuth ──▶ service
                                                        │
                                                        └── allowlist check on callback
 ```
@@ -69,7 +69,7 @@ pnpm dev               # localhost:3000/notion
 
 ## Adding a service
 
-A service is a section here plus a folder. Drop `app/<service>/` alongside `app/notion/`: `route.ts` (MCP endpoint), `oauth/*` (OAuth endpoints), `_internal/` (tools, client, identity; underscore keeps it off the router). Reuse `lib/oauth-as/` as-is. Set `BRIDGE_PATH` in `_internal/config.ts`; the only new env vars are that service's own OAuth + allowlist.
+A service is a section here plus a folder. Drop `app/<service>/` alongside `app/notion/`: `route.ts` (MCP endpoint), `oauth/*` (OAuth endpoints), `_internal/` (tools, client, identity; underscore keeps it off the router). Reuse `lib/oauth-as/` as-is. Set `SERVICE_PATH` in `_internal/config.ts`; the only new env vars are that service's own OAuth + allowlist.
 
 ## Threat model
 
