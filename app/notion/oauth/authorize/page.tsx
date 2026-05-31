@@ -63,42 +63,37 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
 
   return (
     <Shell>
-      <header className="mb-8">
-        <p className="mb-3 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
-          Authorize OAuth access
+      <header className="mb-7">
+        <p className="mb-4 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
+          Authorize access
         </p>
-        <h1 className="font-serif text-3xl leading-tight font-medium tracking-tight text-ink">
-          Send Notion data to{" "}
-          <span className="font-serif italic text-rust">{registrableDomain}</span>?
+        <h1 className="text-ink">
+          <span className="block font-mono text-[32px] leading-[1.1] font-semibold break-all text-rust">
+            {registrableDomain}
+          </span>
+          <span className="mt-2 block font-sans text-xl leading-snug font-medium tracking-tight">
+            requests access to your Notion
+          </span>
         </h1>
       </header>
 
-      <section className="mb-7 rounded-sm border-l-[3px] border-rust bg-paper-deep px-6 pt-6 pb-5">
-        <p className="mb-2 font-mono text-[11px] tracking-[0.12em] uppercase text-ink-soft">
-          Authorization code will be sent to
-        </p>
-        <p className="mb-5 font-serif text-[32px] leading-[1.1] font-medium tracking-tight break-all text-ink">
-          {registrableDomain}
-        </p>
+      <div className="mb-8">
         <p className="mb-1.5 font-mono text-[11px] tracking-[0.12em] uppercase text-ink-soft">
-          Full redirect URI:
+          Full URL
         </p>
-        <code className="block font-mono text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink">
+        <code className="block font-mono text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-soft">
           {result.clientRedirectUri}
         </code>
-      </section>
+      </div>
 
-      <section className="mb-8 text-sm leading-relaxed text-ink">
-        <strong className="font-semibold text-rust">Verify the domain before continuing.</strong>{" "}
-        Anyone can start an OAuth flow against this bridge — only the domain above is bound to where
-        your authorization code will end up. If you didn&rsquo;t start this on{" "}
-        <code className="rounded-sm bg-paper-deep px-1.5 py-px font-mono text-[13px]">
-          {registrableDomain}
-        </code>
-        , cancel.
-      </section>
+      <p className="mb-8 text-sm leading-relaxed text-ink">
+        <strong className="font-semibold text-rust">
+          Approve only if you recognize this domain
+        </strong>{" "}
+        as an AI agent or chatbot you trust with your Notion. Anyone can send you this link.
+      </p>
 
-      <section className="mb-7 flex items-center gap-4">
+      <section className="flex items-center gap-4">
         <a
           href={notionUrl}
           className="inline-flex items-center justify-center rounded-sm border border-ink bg-ink px-6 py-3 font-sans text-[15px] font-medium tracking-[0.01em] text-paper transition-colors duration-100 hover:border-rust hover:bg-rust"
@@ -112,11 +107,6 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
           Cancel
         </a>
       </section>
-
-      <footer className="border-t border-ink/8 pt-6 text-[13px] leading-relaxed text-ink-soft">
-        Clicking Continue sends you to Notion&rsquo;s standard consent screen. Notion then redirects
-        back through this bridge, which sends the authorization code to the domain above.
-      </footer>
     </Shell>
   );
 }
@@ -136,7 +126,7 @@ function ErrorScreen({
         <p className="mb-3 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
           {error}
         </p>
-        <h1 className="font-serif text-3xl leading-tight font-medium tracking-tight text-ink">
+        <h1 className="font-sans text-2xl leading-tight font-semibold tracking-tight text-ink">
           {title}
         </h1>
       </header>
@@ -147,14 +137,8 @@ function ErrorScreen({
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <main
-      className="grid min-h-screen place-items-center bg-paper px-6 py-12 font-sans text-ink"
-      style={{
-        backgroundImage:
-          "radial-gradient(circle at 12% 18%, rgba(182, 65, 26, 0.04), transparent 35%), radial-gradient(circle at 88% 82%, rgba(74, 93, 35, 0.05), transparent 40%)",
-      }}
-    >
-      <article className="w-full max-w-[560px] rounded border border-ink/10 bg-paper px-11 py-10 shadow-[0_1px_0_rgba(31,26,20,0.04),0_24px_48px_-24px_rgba(31,26,20,0.18)]">
+    <main className="grid min-h-screen place-items-center bg-paper-deep px-6 py-12 font-sans text-ink">
+      <article className="w-full max-w-[520px] rounded-sm border border-ink/15 bg-paper px-10 py-9">
         {children}
       </article>
     </main>
