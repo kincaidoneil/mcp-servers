@@ -1,11 +1,11 @@
 import type { OAuthConfig } from "@/lib/oauth-as";
 
-// This bridge's URL path under the apex domain. Future bridges declare
-// their own (e.g. "/strava") in their own config module. The apex
-// (PUBLIC_BASE_URL) is shared across all bridges in this deployment.
-const BRIDGE_PATH = "/notion";
+// This service's URL path under the apex domain. Each service declares its
+// own (e.g. "/strava") in its own config module. The apex (PUBLIC_BASE_URL)
+// is shared across every service in this deployment.
+const SERVICE_PATH = "/notion";
 
-export interface NotionBridgeConfig {
+export interface NotionConfig {
   oauth: OAuthConfig;
   notion: {
     clientId: string;
@@ -18,9 +18,9 @@ export interface NotionBridgeConfig {
   };
 }
 
-let cached: NotionBridgeConfig | null = null;
+let cached: NotionConfig | null = null;
 
-export function getConfig(): NotionBridgeConfig {
+export function getConfig(): NotionConfig {
   if (cached) return cached;
   cached = loadConfig();
   return cached;
@@ -31,9 +31,9 @@ export function resetConfigCacheForTesting() {
   cached = null;
 }
 
-function loadConfig(): NotionBridgeConfig {
+function loadConfig(): NotionConfig {
   const apex = stripTrailingSlash(required("PUBLIC_BASE_URL"));
-  const baseUrl = `${apex}${BRIDGE_PATH}`;
+  const baseUrl = `${apex}${SERVICE_PATH}`;
   const signingKey = decodeSigningKey(required("JWT_SIGNING_KEY"));
 
   const emails = parseList(process.env["ALLOWED_NOTION_EMAILS"]).map((s) => s.toLowerCase());

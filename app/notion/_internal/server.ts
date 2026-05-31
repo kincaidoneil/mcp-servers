@@ -82,7 +82,7 @@ export function createNotionMcpHandler() {
     (server) => {
       registerTools(server);
     },
-    { serverInfo: { name: "mcp-bridge-notion", version: "0.1.0" } },
+    { serverInfo: { name: "notion-query", version: "0.1.0" } },
     {
       streamableHttpEndpoint: "/notion",
       disableSse: true,
