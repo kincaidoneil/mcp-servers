@@ -21,6 +21,21 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  // Consent screens handle secrets (the Hevy bridge collects an API key), so
+  // lock down framing, referrers, and caching on every bridge's oauth pages.
+  async headers() {
+    return [
+      {
+        source: "/:bridge/oauth/:path*",
+        headers: [
+          { key: "Content-Security-Policy", value: "frame-ancestors 'none'; form-action 'self'" },
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+    ];
+  },
 };
 
 export default nextConfig;
