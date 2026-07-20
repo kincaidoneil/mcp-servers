@@ -1,54 +1,32 @@
 import { redirect } from "next/navigation";
-import { getDomain } from "tldts";
-import { validateAuthorize } from "@/lib/oauth-as";
+import {
+  ConsentHeader,
+  ConsentRedirectUri,
+  ConsentShell,
+  ErrorScreen,
+  resolveAuthorizePage,
+  type SearchParams,
+} from "@/lib/consent";
 import { getConfig } from "../../_internal/config";
 import { buildNotionAuthorizeUrl } from "../../_internal/notion-oauth";
 
-type SearchParams = Promise<{ [k: string]: string | string[] | undefined }>;
-
 export const dynamic = "force-dynamic";
 
-export default async function AuthorizePage({ searchParams }: { searchParams: SearchParams }) {
-  const sp = await searchParams;
+export default async function AuthorizePage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
   const config = getConfig();
-
-  const result = await validateAuthorize(
-    {
-      client_id: pick(sp, "client_id"),
-      redirect_uri: pick(sp, "redirect_uri"),
-      response_type: pick(sp, "response_type"),
-      code_challenge: pick(sp, "code_challenge"),
-      code_challenge_method: pick(sp, "code_challenge_method"),
-      state: pick(sp, "state"),
-      scope: pick(sp, "scope"),
-    },
-    config.oauth,
-  );
+  const result = await resolveAuthorizePage(await searchParams, config.oauth);
 
   if (!result.ok) {
-    if (result.status === 302) {
-      // Bad PKCE/response_type — bounce back to the client with ?error=
-      redirect(result.redirectUrl);
-    }
+    if (result.kind === "redirect") redirect(result.redirectUrl);
     return (
       <ErrorScreen
         title="Authorization request rejected"
         error={result.error}
-        description={result.error_description}
-      />
-    );
-  }
-
-  // Defense in depth: even if a Punycode redirect_uri slipped past DCR, also
-  // block here.
-  const parsed = new URL(result.clientRedirectUri);
-  const hostname = parsed.hostname.toLowerCase();
-  if (hostname.split(".").some((label) => label.startsWith("xn--"))) {
-    return (
-      <ErrorScreen
-        title="Authorization request rejected"
-        error="invalid_redirect_uri"
-        description="This bridge rejects redirect URIs that use internationalized (Punycode) domains."
+        description={result.description}
       />
     );
   }
@@ -58,33 +36,11 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
     config.notion.redirectUri,
     result.asState,
   );
-  const cancelUrl = buildCancelUrl(result.clientRedirectUri, result.clientState);
-  const registrableDomain = getDomain(hostname) ?? hostname;
 
   return (
-    <Shell>
-      <header className="mb-7">
-        <p className="mb-4 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
-          Authorize access
-        </p>
-        <h1 className="text-ink">
-          <span className="block font-mono text-[32px] leading-[1.1] font-semibold break-all text-rust">
-            {registrableDomain}
-          </span>
-          <span className="mt-2 block font-sans text-xl leading-snug font-medium tracking-tight">
-            requests access to your Notion
-          </span>
-        </h1>
-      </header>
-
-      <div className="mb-8">
-        <p className="mb-1.5 font-mono text-[11px] tracking-[0.12em] uppercase text-ink-soft">
-          Full URL
-        </p>
-        <code className="block font-mono text-[13px] leading-relaxed break-all whitespace-pre-wrap text-ink-soft">
-          {result.clientRedirectUri}
-        </code>
-      </div>
+    <ConsentShell>
+      <ConsentHeader registrableDomain={result.registrableDomain} serviceLabel="Notion" />
+      <ConsentRedirectUri uri={result.clientRedirectUri} />
 
       <p className="mb-8 text-sm leading-relaxed text-ink">
         <strong className="font-semibold text-rust">
@@ -101,59 +57,12 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
           Continue to Notion
         </a>
         <a
-          href={cancelUrl}
+          href={result.cancelUrl}
           className="font-sans text-[15px] font-medium text-ink-soft underline decoration-1 underline-offset-4 hover:text-ink"
         >
           Cancel
         </a>
       </section>
-    </Shell>
+    </ConsentShell>
   );
-}
-
-function ErrorScreen({
-  title,
-  error,
-  description,
-}: {
-  title: string;
-  error: string;
-  description: string;
-}) {
-  return (
-    <Shell>
-      <header className="mb-8">
-        <p className="mb-3 font-mono text-[11px] tracking-[0.18em] uppercase text-ink-soft">
-          {error}
-        </p>
-        <h1 className="font-sans text-2xl leading-tight font-semibold tracking-tight text-ink">
-          {title}
-        </h1>
-      </header>
-      <p className="text-[15px] leading-relaxed text-ink">{description}</p>
-    </Shell>
-  );
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <main className="grid min-h-screen place-items-center bg-paper-deep px-6 py-12 font-sans text-ink">
-      <article className="w-full max-w-[520px] rounded-sm border border-ink/15 bg-paper px-10 py-9">
-        {children}
-      </article>
-    </main>
-  );
-}
-
-function pick(sp: { [k: string]: string | string[] | undefined }, key: string): string | null {
-  const v = sp[key];
-  return typeof v === "string" ? v : null;
-}
-
-function buildCancelUrl(redirectUri: string, state: string | null): string {
-  const url = new URL(redirectUri);
-  url.searchParams.set("error", "access_denied");
-  url.searchParams.set("error_description", "user cancelled at consent screen");
-  if (state) url.searchParams.set("state", state);
-  return url.toString();
 }

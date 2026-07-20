@@ -1,6 +1,6 @@
-import { createMcpHandler, withMcpAuth } from "mcp-handler";
+import { createMcpHandler } from "mcp-handler";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { verifyAccessToken } from "@/lib/oauth-as";
+import { extractUpstreamToken, protectMcpHandler } from "@/lib/oauth-as";
 import { getConfig } from "./config";
 import { createNotionClient } from "./client";
 import { QueryDataSourceInputSchema, queryDataSource } from "./tools/query-data-source";
@@ -24,7 +24,7 @@ function registerTools(server: McpServer) {
       },
     },
     async (input, extra) => {
-      const upstreamToken = extractUpstreamToken(extra);
+      const upstreamToken = extractUpstreamToken(extra, "Notion access token");
       const notion = createNotionClient(upstreamToken);
       const result = await queryDataSource(input, notion);
       return {
@@ -51,7 +51,7 @@ function registerTools(server: McpServer) {
       },
     },
     async (input, extra) => {
-      const upstreamToken = extractUpstreamToken(extra);
+      const upstreamToken = extractUpstreamToken(extra, "Notion access token");
       const notion = createNotionClient(upstreamToken);
       const result = await queryDatabaseView(input, notion);
       return {
@@ -62,22 +62,8 @@ function registerTools(server: McpServer) {
   );
 }
 
-interface MaybeAuthInfo {
-  authInfo?: { extra?: { upstreamAccessToken?: unknown } };
-}
-
-function extractUpstreamToken(extra: unknown): string {
-  const authInfo = (extra as MaybeAuthInfo).authInfo;
-  const token = authInfo?.extra?.upstreamAccessToken;
-  if (typeof token !== "string" || token.length === 0) {
-    throw new Error("missing upstream Notion access token in auth context");
-  }
-  return token;
-}
-
 // Compose the Streamable HTTP MCP handler at /notion, gated by withMcpAuth.
 export function createNotionMcpHandler() {
-  const config = getConfig();
   const rawHandler = createMcpHandler(
     (server) => {
       registerTools(server);
@@ -89,22 +75,5 @@ export function createNotionMcpHandler() {
       verboseLogs: false,
     },
   );
-  return withMcpAuth(
-    rawHandler,
-    async (_req, bearer) => {
-      if (!bearer) return undefined;
-      const verified = await verifyAccessToken(bearer, config.oauth);
-      if (!verified) return undefined;
-      return {
-        token: bearer,
-        clientId: verified.clientId,
-        scopes: verified.scopes,
-        extra: {
-          upstreamAccessToken: verified.upstreamAccessToken,
-          identity: verified.identity,
-        },
-      };
-    },
-    { required: true, resourceMetadataPath: "/notion/.well-known/oauth-protected-resource" },
-  );
+  return protectMcpHandler(rawHandler, "/notion", () => getConfig().oauth);
 }

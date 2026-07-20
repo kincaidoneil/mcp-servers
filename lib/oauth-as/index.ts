@@ -11,6 +11,21 @@ export {
 } from "./callback-helpers";
 export { handleTokenRequest } from "./token";
 export { verifyAccessToken } from "./verify";
+export {
+  createAsMetadataRoute,
+  createProtectedResourceRoute,
+  createRegisterRoute,
+  createTokenRoute,
+} from "./routes";
+export { escapeHtml, htmlErrorPage } from "./html";
+export { extractUpstreamToken, protectMcpHandler } from "./bridge";
+export {
+  decodeSigningKey,
+  loadOAuthConfigFromEnv,
+  parseList,
+  requiredEnv,
+  stripTrailingSlash,
+} from "./env";
 export type { OAuthConfig } from "./types";
 export type { VerifiedAccessToken } from "./verify";
 export type { AuthorizationServerMetadata, ProtectedResourceMetadata } from "./metadata";

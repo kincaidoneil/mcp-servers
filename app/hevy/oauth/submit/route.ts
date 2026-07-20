@@ -7,7 +7,7 @@
 // cross-site POST has no ambient authority to ride on, and the state binds
 // this submission to a validated /authorize request.
 
-import { buildClientCallbackUrl, decodeAsState } from "@/lib/oauth-as";
+import { buildClientCallbackUrl, decodeAsState, htmlErrorPage as errorPage } from "@/lib/oauth-as";
 import { getConfig } from "../../_internal/config";
 import { validateApiKey } from "../../_internal/hevy-auth";
 
@@ -70,25 +70,4 @@ export async function POST(req: Request) {
     status: 303,
     headers: { Location: redirectUrl, "Cache-Control": "no-store" },
   });
-}
-
-function errorPage(status: number, error: string, description: string): Response {
-  const safeError = escapeHtml(error);
-  const safeDescription = escapeHtml(description);
-  return new Response(
-    `<!doctype html><html><head><title>${safeError}</title></head><body><h1>${safeError}</h1><p>${safeDescription}</p></body></html>`,
-    {
-      status,
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-    },
-  );
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 }

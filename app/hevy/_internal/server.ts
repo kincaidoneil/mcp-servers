@@ -1,7 +1,7 @@
-import { createMcpHandler, withMcpAuth } from "mcp-handler";
+import { createMcpHandler } from "mcp-handler";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { z } from "zod";
-import { verifyAccessToken } from "@/lib/oauth-as";
+import { extractUpstreamToken, protectMcpHandler } from "@/lib/oauth-as";
 import { getConfig } from "./config";
 import {
   renderBodyMeasurementsPage,
@@ -93,7 +93,7 @@ function registerTool<Schema extends z.ZodObject<z.ZodRawShape>, Value>(
       },
     },
     async (input, extra) => {
-      const client = createHevyClient(extractUpstreamToken(extra));
+      const client = createHevyClient(extractUpstreamToken(extra, "Hevy API key"));
       const result = await spec.run(spec.schema.parse(input), client);
       return toToolResult(result, spec.render);
     },
@@ -310,22 +310,8 @@ function registerTools(server: McpServer) {
   });
 }
 
-interface MaybeAuthInfo {
-  authInfo?: { extra?: { upstreamAccessToken?: unknown } };
-}
-
-function extractUpstreamToken(extra: unknown): string {
-  const authInfo = (extra as MaybeAuthInfo).authInfo;
-  const token = authInfo?.extra?.upstreamAccessToken;
-  if (typeof token !== "string" || token.length === 0) {
-    throw new Error("missing upstream Hevy API key in auth context");
-  }
-  return token;
-}
-
 // Compose the Streamable HTTP MCP handler at /hevy, gated by withMcpAuth.
 export function createHevyMcpHandler() {
-  const config = getConfig();
   const rawHandler = createMcpHandler(
     (server) => {
       registerTools(server);
@@ -337,24 +323,7 @@ export function createHevyMcpHandler() {
       verboseLogs: false,
     },
   );
-  return withMcpAuth(
-    rawHandler,
-    async (_req, bearer) => {
-      if (!bearer) return undefined;
-      const verified = await verifyAccessToken(bearer, config.oauth);
-      if (!verified) return undefined;
-      return {
-        token: bearer,
-        clientId: verified.clientId,
-        scopes: verified.scopes,
-        extra: {
-          upstreamAccessToken: verified.upstreamAccessToken,
-          identity: verified.identity,
-        },
-      };
-    },
-    { required: true, resourceMetadataPath: "/hevy/.well-known/oauth-protected-resource" },
-  );
+  return protectMcpHandler(rawHandler, "/hevy", () => getConfig().oauth);
 }
 
 // Exported for tests.
