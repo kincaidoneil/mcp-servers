@@ -79,6 +79,16 @@ export const WorkoutExerciseInputSchema = z.object({
     .nullable()
     .optional()
     .describe("Superset id, or null when the exercise is not part of a superset."),
+  supersets_id: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "Read-side alias of superset_id. The list/get tools return supersets_id; accepting " +
+        "it here lets a fetched workout or routine round-trip through save without losing " +
+        "its supersets. Prefer superset_id.",
+    ),
   notes: z.string().nullable().optional().describe("Notes on the exercise."),
   sets: z.array(WorkoutSetInputSchema).min(1).describe("Sets in order."),
 });
@@ -119,6 +129,16 @@ export const RoutineExerciseInputSchema = z.object({
     .nullable()
     .optional()
     .describe("Superset id, or null when the exercise is not part of a superset."),
+  supersets_id: z
+    .number()
+    .int()
+    .nullable()
+    .optional()
+    .describe(
+      "Read-side alias of superset_id. The list/get tools return supersets_id; accepting " +
+        "it here lets a fetched workout or routine round-trip through save without losing " +
+        "its supersets. Prefer superset_id.",
+    ),
   rest_seconds: z
     .number()
     .int()
@@ -134,6 +154,17 @@ export const RoutineWriteSchema = z.object({
   notes: z.string().nullable().optional().describe("Notes for the routine."),
   exercises: z.array(RoutineExerciseInputSchema).min(1).describe("Exercises in order."),
 });
+
+// The Hevy write API expects superset_id, but reads return supersets_id (see the
+// alias on the exercise input schemas). Collapse the two into the single
+// superset_id the API wants, so a fetched exercise saves back with its superset
+// intact. Runs on the parsed input just before the request body is built.
+export function normalizeSupersetId<
+  E extends { superset_id?: number | null; supersets_id?: number | null },
+>(exercise: E): Omit<E, "supersets_id"> {
+  const { supersets_id, ...rest } = exercise;
+  return { ...rest, superset_id: rest.superset_id ?? supersets_id ?? null };
+}
 
 // ---- Write inputs: body measurements ----
 
@@ -175,6 +206,19 @@ export const SetSchema = z.object({
   custom_metric: z.number().nullable().optional(),
 });
 
+// Routine responses (unlike workout responses) carry target rep_range on each
+// set. Keep it so reads render the range and a fetched routine round-trips
+// through hevy-save-routine without losing its programming.
+export const RoutineSetSchema = SetSchema.extend({
+  rep_range: z
+    .object({
+      start: z.number().nullable().optional(),
+      end: z.number().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
+});
+
 export const WorkoutSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -204,6 +248,18 @@ export const PaginatedWorkoutsSchema = z.object({
   page_count: z.number(),
   workouts: z.array(WorkoutSchema),
 });
+
+// Server-synthesized result of a date-ranged workout query. listWorkouts
+// aggregates across API pages and filters by start_time; this is the shape the
+// range renderer and structuredContent see. It has no page_count, which is how
+// the renderer tells it apart from a raw paginated page.
+export interface WorkoutsRangeResult {
+  workouts: Workout[];
+  since: string | null;
+  until: string | null;
+  scanned: number;
+  truncated: boolean;
+}
 
 export const WorkoutCountSchema = z.object({
   workout_count: z.number(),
@@ -243,7 +299,7 @@ export const RoutineSchema = z.object({
         notes: z.string().nullable().optional(),
         exercise_template_id: z.string().optional(),
         supersets_id: z.number().nullable().optional(),
-        sets: z.array(SetSchema).optional(),
+        sets: z.array(RoutineSetSchema).optional(),
       }),
     )
     .optional(),

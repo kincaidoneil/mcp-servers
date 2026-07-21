@@ -20,6 +20,7 @@ import type {
   SetSchema,
   WorkoutCountSchema,
   WorkoutSchema,
+  WorkoutsRangeResult,
 } from "./schemas";
 
 type Workout = z.infer<typeof WorkoutSchema>;
@@ -45,9 +46,9 @@ function present<T>(v: T | null | undefined): v is T {
   return v !== null && v !== undefined;
 }
 
-// Display preferences (HEVY_TIMEZONE / HEVY_UNITS). The API itself is always
-// metric UTC; these only affect the model-facing text. structuredContent
-// keeps the exact metric values.
+// Display preferences (see config.ts). The API itself is always metric UTC;
+// these only affect the model-facing text. structuredContent keeps the exact
+// metric values.
 export interface RenderOptions {
   timeZone: string;
   units: "metric" | "imperial";
@@ -113,6 +114,62 @@ export function formatTimeRange(
   return `${from.day}, ${from.time}–${to.time} ${to.tz} (${dur})`;
 }
 
+// Milliseconds that `timeZone` is offset from UTC at the given instant.
+function tzOffsetMs(instant: number, timeZone: string): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+      .formatToParts(new Date(instant))
+      .map((p) => [p.type, p.value]),
+  );
+  const asUtc = Date.UTC(
+    Number(parts["year"]),
+    Number(parts["month"]) - 1,
+    Number(parts["day"]),
+    Number(parts["hour"]),
+    Number(parts["minute"]),
+    Number(parts["second"]),
+  );
+  // formatToParts has no sub-second field, so compare at whole-second
+  // resolution; the offset is a clean multiple of a minute regardless.
+  return asUtc - Math.floor(instant / 1000) * 1000;
+}
+
+// UTC epoch (ms) for a wall-clock time in `timeZone`. One offset correction;
+// the twice-a-year DST-transition hour is an accepted edge for day boundaries.
+function zonedWallClockToUtc(
+  y: number,
+  mo: number,
+  d: number,
+  h: number,
+  mi: number,
+  s: number,
+  ms: number,
+  timeZone: string,
+): number {
+  const guess = Date.UTC(y, mo - 1, d, h, mi, s, ms);
+  return guess - tzOffsetMs(guess, timeZone);
+}
+
+// Resolve a since/until bound to a UTC instant (ms). Full timestamps (with a
+// "T") are absolute. Bare YYYY-MM-DD dates expand to the start or end of that
+// day in the display timezone, matching how workouts render.
+export function resolveRangeBound(value: string, edge: "start" | "end", timeZone: string): number {
+  if (value.includes("T")) return Date.parse(value);
+  const [y = 0, mo = 1, d = 1] = value.split("-").map(Number);
+  return edge === "start"
+    ? zonedWallClockToUtc(y, mo, d, 0, 0, 0, 0, timeZone)
+    : zonedWallClockToUtc(y, mo, d, 23, 59, 59, 999, timeZone);
+}
+
 // One set → "warmup 225lb×5 @8.5", "2000m 480s", "×12", "225lb×8–12".
 export function renderSet(set: RoutineSet, opts: RenderOptions = DEFAULT_RENDER_OPTIONS): string {
   const range = set.rep_range;
@@ -174,6 +231,36 @@ export function renderWorkoutsPage(
     `page ${page.page} of ${page.page_count}`,
     ...page.workouts.map((w) => renderWorkout(w, opts)),
   ].join("\n\n");
+}
+
+// A date-ranged query: a summary line (count, bounds, how many were scanned)
+// followed by each in-range workout. Notes when the page-scan cap was hit.
+export function renderWorkoutsRange(
+  value: WorkoutsRangeResult,
+  opts: RenderOptions = DEFAULT_RENDER_OPTIONS,
+): string {
+  const n = value.workouts.length;
+  const bounds = [value.since && `since ${value.since}`, value.until && `until ${value.until}`]
+    .filter(Boolean)
+    .join(" ");
+  const header = `${n} workout${n === 1 ? "" : "s"}${bounds ? ` ${bounds}` : ""} (scanned ${value.scanned})`;
+  const parts = [header, ...value.workouts.map((w) => renderWorkout(w, opts))];
+  if (value.truncated) {
+    parts.push(
+      "Note: stopped after scanning the 100 most recent workouts; older matches may " +
+        "exist. Narrow the range, or page through with page/pageSize.",
+    );
+  }
+  return parts.join("\n\n");
+}
+
+// hevy-list-workouts returns either a raw paginated page or a synthesized range
+// result. The page has page_count; the range result does not.
+export function renderWorkoutsResult(
+  value: z.infer<typeof PaginatedWorkoutsSchema> | WorkoutsRangeResult,
+  opts: RenderOptions = DEFAULT_RENDER_OPTIONS,
+): string {
+  return "page_count" in value ? renderWorkoutsPage(value, opts) : renderWorkoutsRange(value, opts);
 }
 
 export function renderWorkoutCount(value: z.infer<typeof WorkoutCountSchema>): string {

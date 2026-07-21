@@ -30,7 +30,7 @@ Read and log [Hevy](https://hevy.com) workouts, build routines, and track body m
 
 | Tool                           | Description                                             |
 | :----------------------------- | :------------------------------------------------------ |
-| `hevy-list-workouts`           | List logged workouts with exercises and sets            |
+| `hevy-list-workouts`           | List workouts, or filter by date range across pages     |
 | `hevy-get-workout`             | Fetch one workout by id                                 |
 | `hevy-get-workout-count`       | Total workout count                                     |
 | `hevy-get-exercise-history`    | Every logged set of one exercise, for progress analysis |

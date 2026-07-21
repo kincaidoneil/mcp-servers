@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { HevyClient } from "../client";
 import {
+  normalizeSupersetId,
   PageSchema,
   PageSize10Schema,
   RoutineFolderIdSchema,
@@ -42,7 +43,8 @@ export const SaveRoutineInputSchema = z.object({
 
 export function saveRoutine(input: z.infer<typeof SaveRoutineInputSchema>, client: HevyClient) {
   const { routine_id, folder_id, ...routine } = input;
+  const body = { ...routine, exercises: routine.exercises.map(normalizeSupersetId) };
   return routine_id
-    ? client.updateRoutine(routine_id, routine)
-    : client.createRoutine({ ...routine, folder_id: folder_id ?? null });
+    ? client.updateRoutine(routine_id, body)
+    : client.createRoutine({ ...body, folder_id: folder_id ?? null });
 }

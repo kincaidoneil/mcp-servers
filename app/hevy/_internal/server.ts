@@ -14,7 +14,7 @@ import {
   renderRoutinesPage,
   renderWorkout,
   renderWorkoutCount,
-  renderWorkoutsPage,
+  renderWorkoutsResult,
   stripNulls,
 } from "./render";
 import { createHevyClient, type HevyClient, type HevyResult } from "./client";
@@ -149,12 +149,15 @@ function registerTools(server: McpServer) {
     name: "hevy-list-workouts",
     title: "List Hevy workouts",
     description:
-      "List logged workouts, newest first, with their exercises and sets. Paginated (max 10 per page). " +
+      "List logged workouts, newest first, with their exercises and sets. " +
+      "Pass since and/or until to filter by date across pages in one call (the common " +
+      "case, e.g. workouts in June); the server scans up to the 100 most recent and " +
+      "returns only in-range workouts. Otherwise it returns one raw page (max 10). " +
       METRIC_NOTE,
     schema: ListWorkoutsInputSchema,
     readOnly: true,
-    run: listWorkouts,
-    render: (v) => renderWorkoutsPage(v, getConfig().display),
+    run: (input, client) => listWorkouts(input, client, getConfig().display.timeZone),
+    render: (v) => renderWorkoutsResult(v, getConfig().display),
   });
 
   registerTool(server, {

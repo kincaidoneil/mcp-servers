@@ -7,6 +7,8 @@ import {
   renderRoutine,
   renderSet,
   renderWorkout,
+  renderWorkoutsRange,
+  resolveRangeBound,
   stripNulls,
   type RenderOptions,
 } from "../render";
@@ -37,6 +39,64 @@ describe("formatTimeRange", () => {
 
   it("falls back to the raw string on unparseable input", () => {
     expect(formatTimeRange("not-a-date", undefined)).toBe("not-a-date");
+  });
+});
+
+describe("resolveRangeBound", () => {
+  it("passes full timestamps through as absolute instants", () => {
+    expect(resolveRangeBound("2026-06-15T12:00:00Z", "start", "America/New_York")).toBe(
+      Date.parse("2026-06-15T12:00:00Z"),
+    );
+  });
+
+  it("expands a bare date to the start or end of the day in the display timezone", () => {
+    // June 15 is EDT (UTC-4): local midnight is 04:00Z, end-of-day is 03:59:59.999Z next day.
+    expect(resolveRangeBound("2026-06-15", "start", "America/New_York")).toBe(
+      Date.parse("2026-06-15T04:00:00.000Z"),
+    );
+    expect(resolveRangeBound("2026-06-15", "end", "America/New_York")).toBe(
+      Date.parse("2026-06-16T03:59:59.999Z"),
+    );
+  });
+
+  it("expands a bare date in UTC when that is the display timezone", () => {
+    expect(resolveRangeBound("2026-06-15", "start", "UTC")).toBe(
+      Date.parse("2026-06-15T00:00:00.000Z"),
+    );
+  });
+});
+
+describe("renderWorkoutsRange", () => {
+  it("summarizes the count, bounds, and scan total", () => {
+    const text = renderWorkoutsRange({
+      workouts: [
+        {
+          id: "w1",
+          title: "Push Day",
+          start_time: "2026-06-15T12:00:00Z",
+          end_time: "2026-06-15T13:00:00Z",
+          exercises: [],
+        },
+      ],
+      since: "2026-06-01",
+      until: "2026-06-30",
+      scanned: 24,
+      truncated: false,
+    });
+    expect(text).toContain("1 workout since 2026-06-01 until 2026-06-30 (scanned 24)");
+    expect(text).toContain("## Push Day");
+  });
+
+  it("notes when the scan cap truncated the results", () => {
+    const text = renderWorkoutsRange({
+      workouts: [],
+      since: null,
+      until: null,
+      scanned: 100,
+      truncated: true,
+    });
+    expect(text).toContain("0 workouts (scanned 100)");
+    expect(text).toContain("stopped after scanning the 100 most recent");
   });
 });
 

@@ -14,12 +14,13 @@ export const HEVY_BASE = "https://api.hevyapp.com/v1";
 
 export const TEST_API_KEY = "11111111-2222-3333-4444-555555555555";
 
-export function workoutFixture(opts: { id: string; title?: string }) {
+export function workoutFixture(opts: { id: string; title?: string; start_time?: string }) {
+  const start = opts.start_time ?? "2026-07-19T12:00:00Z";
   return {
     id: opts.id,
     title: opts.title ?? "Morning Workout",
     description: null,
-    start_time: "2026-07-19T12:00:00Z",
+    start_time: start,
     end_time: "2026-07-19T13:00:00Z",
     created_at: "2026-07-19T13:00:05Z",
     updated_at: "2026-07-19T13:00:05Z",

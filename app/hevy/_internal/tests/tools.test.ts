@@ -7,6 +7,7 @@ import {
   LogBodyMeasurementInputSchema,
 } from "../tools/body-measurements";
 import { ListExerciseTemplatesInputSchema } from "../tools/exercise-templates";
+import { RoutineSchema } from "../schemas";
 import { listRoutineFolders, ListRoutineFoldersInputSchema } from "../tools/routine-folders";
 import { saveRoutine, SaveRoutineInputSchema } from "../tools/routines";
 import {
@@ -117,6 +118,33 @@ describe("workout tools", () => {
     expect(body).toMatchObject({ workout: { title: "Leg Day" } });
   });
 
+  it("normalizes a fetched supersets_id back to superset_id on save", async () => {
+    let body: unknown = null;
+    server.use(
+      http.post(`${HEVY_BASE}/workouts`, async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(workoutFixture({ id: WORKOUT_UUID }), { status: 201 });
+      }),
+    );
+    // The read tools return supersets_id; the save schema also accepts it so a
+    // fetched workout round-trips. The outgoing body must use superset_id.
+    const input = SaveWorkoutInputSchema.parse({
+      ...workoutInput,
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          supersets_id: 1,
+          sets: [{ type: "normal", weight_kg: 100, reps: 5 }],
+        },
+      ],
+    });
+    const result = await saveWorkout(input, client);
+    expect(result.ok).toBe(true);
+    const ex = (body as { workout: { exercises: Record<string, unknown>[] } }).workout.exercises[0];
+    expect(ex?.["superset_id"]).toBe(1);
+    expect(ex).not.toHaveProperty("supersets_id");
+  });
+
   it("save-workout PUTs to the workout when workout_id is present", async () => {
     let path: string | null = null;
     server.use(
@@ -129,6 +157,82 @@ describe("workout tools", () => {
     const result = await saveWorkout(input, client);
     expect(result.ok).toBe(true);
     expect(path).toBe(`/v1/workouts/${WORKOUT_UUID}`);
+  });
+
+  // Serve workouts newest-first across pages, recording which pages were hit.
+  function pagedWorkouts(pages: string[][]) {
+    const requested: number[] = [];
+    server.use(
+      http.get(`${HEVY_BASE}/workouts`, ({ request }) => {
+        const page = Number(new URL(request.url).searchParams.get("page") ?? "1");
+        requested.push(page);
+        const times = pages[page - 1] ?? [];
+        return HttpResponse.json({
+          page,
+          page_count: pages.length,
+          workouts: times.map((start_time, i) =>
+            workoutFixture({ id: `w-${page}-${i}`, start_time }),
+          ),
+        });
+      }),
+    );
+    return requested;
+  }
+
+  it("filters by since/until and early-exits once a page falls before since", async () => {
+    const requested = pagedWorkouts([
+      ["2026-06-20T12:00:00Z", "2026-06-15T12:00:00Z"],
+      ["2026-06-05T12:00:00Z", "2026-06-01T12:00:00Z"],
+      ["2026-05-20T12:00:00Z"],
+    ]);
+    const input = ListWorkoutsInputSchema.parse({ since: "2026-06-10", until: "2026-06-18" });
+    const result = await listWorkouts(input, client);
+    expect(result.ok).toBe(true);
+    if (!result.ok || "page_count" in result.value) throw new Error("expected range result");
+    // 06-20 is above until, 06-15 is in range; page 2 is all before since → stop.
+    expect(result.value.workouts.map((w) => w.start_time)).toEqual(["2026-06-15T12:00:00Z"]);
+    expect(result.value.truncated).toBe(false);
+    expect(requested).toEqual([1, 2]);
+  });
+
+  it("stops at the limit without fetching further pages", async () => {
+    const requested = pagedWorkouts([
+      ["2026-06-20T12:00:00Z", "2026-06-19T12:00:00Z"],
+      ["2026-06-18T12:00:00Z"],
+    ]);
+    const input = ListWorkoutsInputSchema.parse({ since: "2026-01-01", limit: 1 });
+    const result = await listWorkouts(input, client);
+    expect(result.ok).toBe(true);
+    if (!result.ok || "page_count" in result.value) throw new Error("expected range result");
+    expect(result.value.workouts).toHaveLength(1);
+    expect(requested).toEqual([1]);
+  });
+
+  it("flags truncation when the page-scan cap is hit", async () => {
+    // 12 pages available, all in range; the scan stops at 10.
+    const pages = Array.from({ length: 12 }, () => ["2020-01-01T12:00:00Z"]);
+    const requested = pagedWorkouts(pages);
+    const input = ListWorkoutsInputSchema.parse({ since: "2000-01-01" });
+    const result = await listWorkouts(input, client);
+    expect(result.ok).toBe(true);
+    if (!result.ok || "page_count" in result.value) throw new Error("expected range result");
+    expect(result.value.truncated).toBe(true);
+    expect(result.value.scanned).toBe(10);
+    expect(requested).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it("returns a raw page when no filter is given", async () => {
+    let query: string | null = null;
+    server.use(
+      http.get(`${HEVY_BASE}/workouts`, ({ request }) => {
+        query = new URL(request.url).search;
+        return HttpResponse.json({ page: 1, page_count: 4, workouts: [] });
+      }),
+    );
+    const result = await listWorkouts(ListWorkoutsInputSchema.parse({ page: 2 }), client);
+    expect(result.ok).toBe(true);
+    if (!result.ok || !("page_count" in result.value)) throw new Error("expected paged result");
+    expect(query).toBe("?page=2&pageSize=10");
   });
 
   it("passes exercise history date filters through", async () => {
@@ -185,6 +289,50 @@ describe("routine tools", () => {
     expect((updateBody as { routine: Record<string, unknown> }).routine).not.toHaveProperty(
       "folder_id",
     );
+  });
+
+  it("normalizes a fetched supersets_id back to superset_id on save", async () => {
+    let createBody: unknown = null;
+    server.use(
+      http.post(`${HEVY_BASE}/routines`, async ({ request }) => {
+        createBody = await request.json();
+        return HttpResponse.json(routineFixture({ id: ROUTINE_UUID }), { status: 201 });
+      }),
+    );
+    const input = SaveRoutineInputSchema.parse({
+      title: "Upper Body",
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          supersets_id: 2,
+          sets: [{ type: "normal" as const, reps: 8 }],
+        },
+      ],
+    });
+    const result = await saveRoutine(input, client);
+    expect(result.ok).toBe(true);
+    const ex = (createBody as { routine: { exercises: Record<string, unknown>[] } }).routine
+      .exercises[0];
+    expect(ex?.["superset_id"]).toBe(2);
+    expect(ex).not.toHaveProperty("supersets_id");
+  });
+});
+
+describe("response schemas", () => {
+  it("keeps target rep_range on routine response sets", () => {
+    // Routine GETs return rep_range on each set; it must survive parsing so
+    // reads render the range and fetch-edit-save preserves it.
+    const parsed = RoutineSchema.parse({
+      id: ROUTINE_UUID,
+      title: "Upper Body",
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          sets: [{ type: "normal", weight_kg: 100, rep_range: { start: 8, end: 12 } }],
+        },
+      ],
+    });
+    expect(parsed.exercises?.[0]?.sets?.[0]?.rep_range).toEqual({ start: 8, end: 12 });
   });
 });
 
