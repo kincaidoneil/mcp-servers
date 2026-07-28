@@ -302,8 +302,8 @@ function registerTools(server: McpServer) {
     title: "Log a Hevy body measurement",
     description:
       "Log a body measurement for a date (weight, body fat %, circumferences in cm). " +
-      "Weight and lean mass accept either kilograms (weight_kg) or pounds (weight_lbs), " +
-      "converted server-side. " +
+      "Body weight takes weight_kg or weight_lbs; lean mass takes lean_mass_kg or " +
+      "lean_mass_lbs. Pounds are converted server-side. Pass one unit per field, never both. " +
       "Fails with a conflict if a measurement already exists for that date; " +
       "existing measurements cannot be updated through this bridge.",
     schema: LogBodyMeasurementInputSchema,
