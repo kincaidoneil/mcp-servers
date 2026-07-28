@@ -383,6 +383,27 @@ describe("pound-to-kilogram conversion on write", () => {
     expect(body).not.toHaveProperty("weight_lbs");
   });
 
+  it("keeps lean mass in its own field rather than folding it into body weight", async () => {
+    let body: unknown = null;
+    server.use(
+      http.post(`${HEVY_BASE}/body_measurements`, async ({ request }) => {
+        body = await request.json();
+        return new HttpResponse(null, { status: 201 });
+      }),
+    );
+    const input = LogBodyMeasurementInputSchema.parse({
+      date: "2026-07-28",
+      weight_lbs: 182.2,
+      lean_mass_lbs: 145,
+    });
+    const result = await logBodyMeasurement(input, client);
+    expect(result.ok).toBe(true);
+    const sent = body as Record<string, unknown>;
+    expect(sent["lean_mass_kg"]).toBe(lbToKg(145));
+    expect(sent["weight_kg"]).toBe(lbToKg(182.2));
+    expect(sent).not.toHaveProperty("lean_mass_lbs");
+  });
+
   it("rejects a measurement carrying both weight units", () => {
     const parsed = LogBodyMeasurementInputSchema.safeParse({
       date: "2026-07-28",
