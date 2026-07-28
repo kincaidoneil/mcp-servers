@@ -22,6 +22,7 @@ import type {
   WorkoutSchema,
   WorkoutsRangeResult,
 } from "./schemas";
+import { cmToIn, kgToLb } from "./units";
 
 type Workout = z.infer<typeof WorkoutSchema>;
 type Routine = z.infer<typeof RoutineSchema>;
@@ -56,19 +57,17 @@ export interface RenderOptions {
 
 export const DEFAULT_RENDER_OPTIONS: RenderOptions = { timeZone: "UTC", units: "metric" };
 
-const KG_PER_LB = 0.45359237;
-
 function num(n: number): string {
   const rounded = Math.round(n * 10) / 10;
   return String(rounded);
 }
 
 function weight(kg: number, opts: RenderOptions): string {
-  return opts.units === "imperial" ? `${num(kg / KG_PER_LB)}lb` : `${num(kg)}kg`;
+  return opts.units === "imperial" ? `${num(kgToLb(kg))}lb` : `${num(kg)}kg`;
 }
 
 function bodyLength(cm: number, opts: RenderOptions): string {
-  return opts.units === "imperial" ? `${num(cm / 2.54)}in` : `${num(cm)}cm`;
+  return opts.units === "imperial" ? `${num(cmToIn(cm))}in` : `${num(cm)}cm`;
 }
 
 function dayAndTime(d: Date, timeZone: string): { day: string; time: string; tz: string } {

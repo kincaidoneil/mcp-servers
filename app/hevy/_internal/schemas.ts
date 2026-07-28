@@ -4,6 +4,7 @@
 // values flow into request bodies and URL paths.
 
 import { z } from "zod";
+import { lbToKg } from "./units";
 
 // ---- ID and date formats (inputs that end up in URL paths) ----
 
@@ -43,12 +44,36 @@ export const SetTypeSchema = z
   .enum(["warmup", "normal", "failure", "dropset"])
   .describe("Set type.");
 
+const POUNDS_TAIL =
+  "The server converts to kilograms with the exact factor. Use this whenever the weight " +
+  "is known in pounds and never convert by hand: a tidy kilogram value is not a tidy " +
+  "pound value, so 75 lb rounded to 34 kg reads back as 74.96 lb.";
+
+const WEIGHT_CONFLICT = {
+  message: "Pass weight_kg or weight_lbs, not both. They are two spellings of one field.",
+  path: ["weight_lbs"],
+};
+
+function present(value: number | null | undefined): value is number {
+  return value !== null && value !== undefined;
+}
+
+// weight_kg and weight_lbs are alternative spellings, so accepting both at once
+// would mean silently picking a winner. Reject it at the boundary instead.
+const oneWeightUnit = (value: { weight_kg?: number | null; weight_lbs?: number | null }): boolean =>
+  !present(value.weight_kg) || !present(value.weight_lbs);
+
 const setMetricFields = {
   weight_kg: z
     .number()
     .nullable()
     .optional()
-    .describe("Weight in kilograms. The Hevy API is metric-only; convert lb to kg first."),
+    .describe("Weight in kilograms. Pass this or weight_lbs, never both."),
+  weight_lbs: z
+    .number()
+    .nullable()
+    .optional()
+    .describe(`Weight in pounds. ${POUNDS_TAIL} Pass this or weight_kg, never both.`),
   reps: z.number().int().nullable().optional().describe("Number of repetitions."),
   distance_meters: z.number().int().nullable().optional().describe("Distance in meters."),
   duration_seconds: z.number().int().nullable().optional().describe("Duration in seconds."),
@@ -59,15 +84,17 @@ const setMetricFields = {
     .describe("Custom metric, currently used for steps and floors."),
 };
 
-export const WorkoutSetInputSchema = z.object({
-  type: SetTypeSchema.default("normal"),
-  ...setMetricFields,
-  rpe: z
-    .number()
-    .nullable()
-    .optional()
-    .describe("Rating of Perceived Exertion. Allowed values: 6, 7, 7.5, 8, 8.5, 9, 9.5, 10."),
-});
+export const WorkoutSetInputSchema = z
+  .object({
+    type: SetTypeSchema.default("normal"),
+    ...setMetricFields,
+    rpe: z
+      .number()
+      .nullable()
+      .optional()
+      .describe("Rating of Perceived Exertion. Allowed values: 6, 7, 7.5, 8, 8.5, 9, 9.5, 10."),
+  })
+  .refine(oneWeightUnit, WEIGHT_CONFLICT);
 
 export const WorkoutExerciseInputSchema = z.object({
   exercise_template_id: ExerciseTemplateIdSchema.describe(
@@ -106,18 +133,20 @@ export const WorkoutWriteSchema = z.object({
 
 // ---- Write inputs: routines ----
 
-export const RoutineSetInputSchema = z.object({
-  type: SetTypeSchema.default("normal"),
-  ...setMetricFields,
-  rep_range: z
-    .object({
-      start: z.number().int().describe("Starting rep count."),
-      end: z.number().int().describe("Ending rep count."),
-    })
-    .nullable()
-    .optional()
-    .describe("Target rep range for the set, e.g. { start: 8, end: 12 }."),
-});
+export const RoutineSetInputSchema = z
+  .object({
+    type: SetTypeSchema.default("normal"),
+    ...setMetricFields,
+    rep_range: z
+      .object({
+        start: z.number().int().describe("Starting rep count."),
+        end: z.number().int().describe("Ending rep count."),
+      })
+      .nullable()
+      .optional()
+      .describe("Target rep range for the set, e.g. { start: 8, end: 12 }."),
+  })
+  .refine(oneWeightUnit, WEIGHT_CONFLICT);
 
 export const RoutineExerciseInputSchema = z.object({
   exercise_template_id: ExerciseTemplateIdSchema.describe(
@@ -155,15 +184,36 @@ export const RoutineWriteSchema = z.object({
   exercises: z.array(RoutineExerciseInputSchema).min(1).describe("Exercises in order."),
 });
 
-// The Hevy write API expects superset_id, but reads return supersets_id (see the
-// alias on the exercise input schemas). Collapse the two into the single
-// superset_id the API wants, so a fetched exercise saves back with its superset
-// intact. Runs on the parsed input just before the request body is built.
-export function normalizeSupersetId<
-  E extends { superset_id?: number | null; supersets_id?: number | null },
->(exercise: E): Omit<E, "supersets_id"> {
-  const { supersets_id, ...rest } = exercise;
-  return { ...rest, superset_id: rest.superset_id ?? supersets_id ?? null };
+type WeightedSet = { weight_kg?: number | null; weight_lbs?: number | null };
+
+// Fold weight_lbs into the weight_kg Hevy stores. Converting here rather than in
+// the caller is the whole point: the exact factor runs on every write.
+function toKilograms<S extends WeightedSet>(set: S): Omit<S, "weight_lbs"> {
+  const { weight_lbs, ...rest } = set;
+  return present(weight_lbs) ? { ...rest, weight_kg: lbToKg(weight_lbs) } : rest;
+}
+
+// Put a parsed exercise into the shape the write API wants, just before the
+// request body is built. Two fixups:
+//
+//   - superset_id: the write API expects it, but reads return supersets_id (see
+//     the alias on the exercise input schemas). Collapse both into superset_id
+//     so a fetched exercise saves back with its superset intact.
+//   - sets: convert any pound weight to kilograms.
+export function normalizeExerciseForWrite<
+  E extends { superset_id?: number | null; supersets_id?: number | null; sets: WeightedSet[] },
+>(
+  exercise: E,
+): Omit<E, "supersets_id" | "sets"> & {
+  superset_id: number | null;
+  sets: Omit<E["sets"][number], "weight_lbs">[];
+} {
+  const { supersets_id, sets, ...rest } = exercise;
+  return {
+    ...rest,
+    superset_id: rest.superset_id ?? supersets_id ?? null,
+    sets: sets.map(toKilograms),
+  };
 }
 
 // ---- Write inputs: body measurements ----
@@ -188,10 +238,46 @@ const bodyMetricFields = {
   right_calf: z.number().nullable().optional().describe("Right calf circumference in cm."),
 };
 
+// What the Hevy endpoint receives: metric only.
 export const BodyMeasurementWriteSchema = z.object({
   date: MeasurementDateSchema,
   ...bodyMetricFields,
 });
+
+// What the tool accepts. Body weight and lean mass get pound twins because those
+// are the fields that get logged; circumferences stay metric-only until
+// something actually writes them.
+export const BodyMeasurementInputSchema = z
+  .object({
+    date: MeasurementDateSchema,
+    ...bodyMetricFields,
+    weight_lbs: z
+      .number()
+      .nullable()
+      .optional()
+      .describe(`Body weight in pounds. ${POUNDS_TAIL} Pass this or weight_kg, never both.`),
+    lean_mass_lbs: z
+      .number()
+      .nullable()
+      .optional()
+      .describe("Lean mass in pounds. Pass this or lean_mass_kg, never both."),
+  })
+  .refine(oneWeightUnit, WEIGHT_CONFLICT)
+  .refine((v) => !present(v.lean_mass_kg) || !present(v.lean_mass_lbs), {
+    message: "Pass lean_mass_kg or lean_mass_lbs, not both.",
+    path: ["lean_mass_lbs"],
+  });
+
+export function toMetricMeasurement(
+  input: z.infer<typeof BodyMeasurementInputSchema>,
+): z.infer<typeof BodyMeasurementWriteSchema> {
+  const { weight_lbs, lean_mass_lbs, ...rest } = input;
+  return {
+    ...rest,
+    ...(present(weight_lbs) ? { weight_kg: lbToKg(weight_lbs) } : {}),
+    ...(present(lean_mass_lbs) ? { lean_mass_kg: lbToKg(lean_mass_lbs) } : {}),
+  };
+}
 
 // ---- Response schemas ----
 
@@ -306,10 +392,17 @@ export const RoutineSchema = z.object({
 });
 export type Routine = z.infer<typeof RoutineSchema>;
 
-// GET /v1/routines/{id} wraps the routine in a { routine } envelope; POST and
-// PUT return it bare. Accept both and normalize to the bare routine.
+// The same routine comes back three different ways: GET /v1/routines/{id} wraps
+// it in a { routine } envelope, PUT wraps it in a { routine: [...] } envelope
+// holding one element, and POST returns it bare. Accept all three and normalize
+// to the bare routine. Missing the PUT shape made every successful routine
+// update report itself as a failed one.
 export const RoutineResponseSchema = z.union([
   z.object({ routine: RoutineSchema }).transform((r) => r.routine),
+  // A tuple rather than an array so the first element is typed as present.
+  z
+    .object({ routine: z.tuple([RoutineSchema]).rest(RoutineSchema) })
+    .transform((r) => r.routine[0]),
   RoutineSchema,
 ]);
 

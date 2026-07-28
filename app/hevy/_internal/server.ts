@@ -58,8 +58,9 @@ import {
 } from "./tools/workouts";
 
 const METRIC_NOTE =
-  "The Hevy API is metric-only: weight_kg (kilograms), distance_meters, duration_seconds. " +
-  "Convert imperial units before calling.";
+  "Hevy stores metric: weight_kg (kilograms), distance_meters, duration_seconds. " +
+  "Sets also accept weight_lbs and the server converts it exactly, so pass pounds " +
+  "straight through rather than converting them yourself.";
 
 interface ToolSpec<Schema extends z.ZodObject<z.ZodRawShape>, Value> {
   name: string;
@@ -300,7 +301,9 @@ function registerTools(server: McpServer) {
     name: "hevy-log-body-measurement",
     title: "Log a Hevy body measurement",
     description:
-      "Log a body measurement for a date (weight in kg, body fat %, circumferences in cm). " +
+      "Log a body measurement for a date (weight, body fat %, circumferences in cm). " +
+      "Weight and lean mass accept either kilograms (weight_kg) or pounds (weight_lbs), " +
+      "converted server-side. " +
       "Fails with a conflict if a measurement already exists for that date; " +
       "existing measurements cannot be updated through this bridge.",
     schema: LogBodyMeasurementInputSchema,
