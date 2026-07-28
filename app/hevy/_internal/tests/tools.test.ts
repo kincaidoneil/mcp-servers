@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createHevyClient } from "../client";
+import { renderSet, type RenderOptions } from "../render";
 import { toToolResult } from "../server";
+import { kgToLb, lbToKg } from "../units";
 import {
   ListBodyMeasurementsInputSchema,
   logBodyMeasurement,
@@ -34,6 +36,13 @@ const client = createHevyClient(TEST_API_KEY);
 
 const WORKOUT_UUID = "b459cba5-cd6d-463c-abd6-54f8eafcadcb";
 const ROUTINE_UUID = "0a72f4c1-9a20-45d3-8b6a-2f9f8d7f4b11";
+const NY_IMPERIAL: RenderOptions = { timeZone: "America/New_York", units: "imperial" };
+
+// Reach into a captured request body for the first set of the first exercise.
+function firstSet(body: unknown, kind: "workout" | "routine") {
+  const root = (body as Record<string, { exercises: { sets: Record<string, unknown>[] }[] }>)[kind];
+  return root?.exercises[0]?.sets[0];
+}
 
 const workoutInput = {
   title: "Leg Day",
@@ -254,6 +263,136 @@ describe("workout tools", () => {
   });
 });
 
+describe("pound-to-kilogram conversion on write", () => {
+  // Sets used to be metric-only, so callers converted pounds themselves. A
+  // routine written as a tidy 34 kg is 74.96 lb in the Hevy app, not the 75 lb
+  // it was meant to be. These tests pin the exact factor end to end.
+  const EXACT_75LB_IN_KG = 34.01942775; // 75 × 0.45359237, spelled out so the factor is pinned
+
+  function captureWorkoutPost() {
+    const captured: { body?: unknown } = {};
+    server.use(
+      http.post(`${HEVY_BASE}/workouts`, async ({ request }) => {
+        captured.body = await request.json();
+        return HttpResponse.json(workoutFixture({ id: WORKOUT_UUID }), { status: 201 });
+      }),
+    );
+    return captured;
+  }
+
+  it("converts weight_lbs to exact kilograms on save-workout", async () => {
+    const captured = captureWorkoutPost();
+    const input = SaveWorkoutInputSchema.parse({
+      ...workoutInput,
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          sets: [{ type: "normal", weight_lbs: 75, reps: 9 }],
+        },
+      ],
+    });
+    const result = await saveWorkout(input, client);
+    expect(result.ok).toBe(true);
+    const set = firstSet(captured.body, "workout");
+    expect(set?.["weight_kg"]).toBe(EXACT_75LB_IN_KG);
+    // The pound field is a bridge convenience; Hevy must never receive it.
+    expect(set).not.toHaveProperty("weight_lbs");
+    expect(set?.["reps"]).toBe(9);
+  });
+
+  it("converts weight_lbs on save-routine and keeps rep_range intact", async () => {
+    let body: unknown = null;
+    server.use(
+      http.post(`${HEVY_BASE}/routines`, async ({ request }) => {
+        body = await request.json();
+        return HttpResponse.json(routineFixture({ id: ROUTINE_UUID }), { status: 201 });
+      }),
+    );
+    const input = SaveRoutineInputSchema.parse({
+      title: "Upper B",
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          sets: [{ type: "normal", weight_lbs: 75, rep_range: { start: 6, end: 12 } }],
+        },
+      ],
+    });
+    const result = await saveRoutine(input, client);
+    expect(result.ok).toBe(true);
+    const set = firstSet(body, "routine");
+    expect(set?.["weight_kg"]).toBe(EXACT_75LB_IN_KG);
+    expect(set).not.toHaveProperty("weight_lbs");
+    expect(set?.["rep_range"]).toEqual({ start: 6, end: 12 });
+  });
+
+  it("does not produce the tidy kilogram value that caused the 74.96 lb bug", async () => {
+    const captured = captureWorkoutPost();
+    const input = SaveWorkoutInputSchema.parse({
+      ...workoutInput,
+      exercises: [{ exercise_template_id: "05293BCA", sets: [{ type: "normal", weight_lbs: 75 }] }],
+    });
+    await saveWorkout(input, client);
+    const stored = firstSet(captured.body, "workout")?.["weight_kg"] as number;
+    expect(stored).not.toBe(34);
+    // Whatever Hevy rounds to for display, the value must be 75 lb to the cent.
+    expect(kgToLb(stored).toFixed(2)).toBe("75.00");
+  });
+
+  it("leaves weight_kg alone when pounds are not used", async () => {
+    const captured = captureWorkoutPost();
+    const input = SaveWorkoutInputSchema.parse(workoutInput);
+    await saveWorkout(input, client);
+    expect(firstSet(captured.body, "workout")?.["weight_kg"]).toBe(100);
+  });
+
+  it("round-trips a pound weight back through the imperial renderer", () => {
+    // The read path rounds to one decimal, which is what hid the old error.
+    // An exactly-converted set has to survive that rounding as the same number.
+    for (const lb of [15, 35, 40, 75, 130, 185, 255]) {
+      expect(renderSet({ type: "normal", weight_kg: lbToKg(lb) }, NY_IMPERIAL)).toBe(`${lb}lb`);
+    }
+  });
+
+  it("rejects a set carrying both weight units", () => {
+    const bothUnits = {
+      ...workoutInput,
+      exercises: [
+        {
+          exercise_template_id: "05293BCA",
+          sets: [{ type: "normal", weight_kg: 34, weight_lbs: 75 }],
+        },
+      ],
+    };
+    const parsed = SaveWorkoutInputSchema.safeParse(bothUnits);
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues[0]?.message).toContain("not both");
+  });
+
+  it("converts body weight in pounds and never sends the pound field", async () => {
+    let body: unknown = null;
+    server.use(
+      http.post(`${HEVY_BASE}/body_measurements`, async ({ request }) => {
+        body = await request.json();
+        return new HttpResponse(null, { status: 201 });
+      }),
+    );
+    const input = LogBodyMeasurementInputSchema.parse({ date: "2026-07-28", weight_lbs: 182.2 });
+    const result = await logBodyMeasurement(input, client);
+    expect(result.ok).toBe(true);
+    expect((body as Record<string, unknown>)["weight_kg"]).toBe(lbToKg(182.2));
+    expect(body).not.toHaveProperty("weight_lbs");
+  });
+
+  it("rejects a measurement carrying both weight units", () => {
+    const parsed = LogBodyMeasurementInputSchema.safeParse({
+      date: "2026-07-28",
+      weight_kg: 82.6,
+      weight_lbs: 182.2,
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe("routine tools", () => {
   it("save-routine sends folder_id on create but not on update", async () => {
     let createBody: unknown = null;
@@ -289,6 +428,30 @@ describe("routine tools", () => {
     expect((updateBody as { routine: Record<string, unknown> }).routine).not.toHaveProperty(
       "folder_id",
     );
+  });
+
+  it("accepts every envelope Hevy wraps a routine in", async () => {
+    // GET wraps it in { routine }, POST returns it bare, and PUT wraps it in a
+    // one-element { routine: [...] }. The array form used to fail to parse, so
+    // a successful update surfaced to the model as an error.
+    const routine = routineFixture({ id: ROUTINE_UUID });
+    const envelopes = [
+      { label: "bare", payload: routine },
+      { label: "object", payload: { routine } },
+      { label: "array", payload: { routine: [routine] } },
+    ];
+    for (const { label, payload } of envelopes) {
+      server.use(http.put(`${HEVY_BASE}/routines/:id`, () => HttpResponse.json(payload)));
+      const input = SaveRoutineInputSchema.parse({
+        routine_id: ROUTINE_UUID,
+        title: "Upper Body",
+        exercises: [{ exercise_template_id: "05293BCA", sets: [{ type: "normal", reps: 8 }] }],
+      });
+      // oxlint-disable-next-line no-await-in-loop
+      const result = await saveRoutine(input, client);
+      expect(result, `${label} envelope`).toMatchObject({ ok: true });
+      if (result.ok) expect(result.value.id).toBe(ROUTINE_UUID);
+    }
   });
 
   it("normalizes a fetched supersets_id back to superset_id on save", async () => {

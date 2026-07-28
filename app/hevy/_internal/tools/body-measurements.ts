@@ -1,6 +1,11 @@
 import { z } from "zod";
 import type { HevyClient } from "../client";
-import { BodyMeasurementWriteSchema, PageSchema, PageSize10Schema } from "../schemas";
+import {
+  BodyMeasurementInputSchema,
+  PageSchema,
+  PageSize10Schema,
+  toMetricMeasurement,
+} from "../schemas";
 
 export const ListBodyMeasurementsInputSchema = z.object({
   page: PageSchema,
@@ -14,11 +19,11 @@ export function listBodyMeasurements(
   return client.listBodyMeasurements(input);
 }
 
-export const LogBodyMeasurementInputSchema = BodyMeasurementWriteSchema;
+export const LogBodyMeasurementInputSchema = BodyMeasurementInputSchema;
 
 export function logBodyMeasurement(
   input: z.infer<typeof LogBodyMeasurementInputSchema>,
   client: HevyClient,
 ) {
-  return client.createBodyMeasurement(input);
+  return client.createBodyMeasurement(toMetricMeasurement(input));
 }

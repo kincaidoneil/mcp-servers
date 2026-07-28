@@ -45,7 +45,11 @@ Read and log [Hevy](https://hevy.com) workouts, build routines, and track body m
 | `hevy-list-body-measurements`  | List body weight and circumference measurements         |
 | `hevy-log-body-measurement`    | Log a body measurement for a date                       |
 
-The Hevy API has no deletes, so neither does this server. All values are metric (`weight_kg`, `distance_meters`, `duration_seconds`, circumferences in cm).
+The Hevy API has no deletes, so neither does this server.
+
+Hevy stores metric, and this server converts on both edges so the model never does the arithmetic. Sets and body weight accept `weight_lbs` alongside `weight_kg`, converted server-side with the exact factor; pass one or the other, never both. Distance stays in `distance_meters` and duration in `duration_seconds`, both metric on the way in and out. Reads render in whatever `display.units` is set to in `config.ts`.
+
+Do not convert pounds in the caller. A tidy kilogram value is not a tidy pound value, so 75 lb rounded to 34 kg shows up in Hevy as 74.96 lb.
 
 #### Setup
 

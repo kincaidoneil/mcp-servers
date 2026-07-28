@@ -3,9 +3,9 @@ import type { HevyClient, HevyResult } from "../client";
 import { resolveRangeBound } from "../render";
 import {
   ExerciseTemplateIdSchema,
+  normalizeExerciseForWrite,
   PageSchema,
   PageSize10Schema,
-  normalizeSupersetId,
   type PaginatedWorkoutsSchema,
   type Workout,
   WorkoutIdSchema,
@@ -160,6 +160,6 @@ export const SaveWorkoutInputSchema = z.object({
 
 export function saveWorkout(input: z.infer<typeof SaveWorkoutInputSchema>, client: HevyClient) {
   const { workout_id, ...workout } = input;
-  const body = { ...workout, exercises: workout.exercises.map(normalizeSupersetId) };
+  const body = { ...workout, exercises: workout.exercises.map(normalizeExerciseForWrite) };
   return workout_id ? client.updateWorkout(workout_id, body) : client.createWorkout(body);
 }
