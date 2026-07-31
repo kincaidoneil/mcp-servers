@@ -560,6 +560,16 @@ describe("toToolResult", () => {
     expect(rendered.content[0]?.text).toBe("42 workouts logged");
   });
 
+  it("adds null-stripped structuredContent for round-trip reads", () => {
+    const rendered = toToolResult(
+      { ok: true, value: { workout_count: 42, extra: null } },
+      () => "42 workouts logged",
+      true,
+    );
+    expect(rendered).toMatchObject({ structuredContent: { workout_count: 42 } });
+    expect(rendered.content[0]?.text).toBe("42 workouts logged");
+  });
+
   it("falls back to compact null-stripped JSON without a renderer", () => {
     const rendered = toToolResult({ ok: true, value: { workout_count: 42, extra: null } });
     expect(rendered.content[0]?.text).toBe('{"workout_count":42}');

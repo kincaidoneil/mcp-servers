@@ -83,4 +83,28 @@ describe("hevy MCP server", () => {
     // Prose, not JSON: the raw payload never appears alongside it.
     expect(text).not.toContain("weight_kg");
   });
+
+  // hevy-save-workout replaces a workout in full, so the agent has to fetch the
+  // current one first. The rendering rounds 100kg to "220.5lb" and cuts
+  // start_time to local minutes, both of which would drift on the way back.
+  test("keeps exact values on the reads that feed full-replace writes", async () => {
+    const client = await connectClient();
+    server.use(
+      http.get(`${HEVY_BASE}/workouts/:id`, ({ params }) =>
+        HttpResponse.json(workoutFixture({ id: params["id"] as string })),
+      ),
+    );
+
+    const result = await client.callTool({
+      name: "hevy-get-workout",
+      arguments: { workout_id: "9c465af3-de7d-42bc-9c7c-f0170396358b" },
+    });
+
+    const text = (result.content as { type: string; text: string }[])[0]!.text;
+    expect(text).toContain("220.5lb");
+    expect(result.structuredContent).toMatchObject({
+      start_time: "2026-07-19T12:00:00Z",
+      exercises: [{ sets: [{ weight_kg: 100 }] }],
+    });
+  });
 });
