@@ -57,6 +57,13 @@ import {
   saveWorkout,
 } from "./tools/workouts";
 
+// Collection reads carry whole workouts and routines, so an agent could try to
+// save straight from one. Their renderings round, and only the single-resource
+// gets carry exact values (ToolSpec.roundTrip), so point the caller at those.
+const ROUNDED_NOTE = (rounded: string, getTool: string) =>
+  `${rounded} here are rounded for display, so re-fetch with ${getTool} ` +
+  "before feeding anything back into a full-replace update.";
+
 const METRIC_NOTE =
   "Hevy stores metric: weight_kg (kilograms), distance_meters, duration_seconds. " +
   "Sets also accept weight_lbs and the server converts it exactly, so pass pounds " +
@@ -166,6 +173,8 @@ function registerTools(server: McpServer) {
       "Pass since and/or until to filter by date across pages in one call (the common " +
       "case, e.g. workouts in June); the server scans up to the 100 most recent and " +
       "returns only in-range workouts. Otherwise it returns one raw page (max 10). " +
+      ROUNDED_NOTE("Weights and times", "hevy-get-workout") +
+      " " +
       METRIC_NOTE,
     schema: ListWorkoutsInputSchema,
     readOnly: true,
@@ -212,7 +221,9 @@ function registerTools(server: McpServer) {
     title: "Log or update a Hevy workout",
     description:
       "Log a completed workout (omit workout_id) or update an existing one (pass workout_id). " +
-      "Updates replace the workout in full, so fetch it first and send the complete version. " +
+      "Updates replace the workout in full. Fetch the current version with hevy-get-workout " +
+      "first and send it back complete: that tool carries exact values, while the list " +
+      "renderings round them. " +
       "Two fields cannot survive that round trip. Hevy never returns is_private on reads, so " +
       "pass it explicitly to keep a workout private. routine_id is read-only, so an updated " +
       "workout cannot be relinked to the routine it came from. " +
@@ -227,7 +238,9 @@ function registerTools(server: McpServer) {
   registerTool(server, {
     name: "hevy-list-routines",
     title: "List Hevy routines",
-    description: "List workout routines (training templates). Paginated (max 10 per page).",
+    description:
+      "List workout routines (training templates). Paginated (max 10 per page). " +
+      ROUNDED_NOTE("Weights", "hevy-get-routine"),
     schema: ListRoutinesInputSchema,
     readOnly: true,
     run: listRoutines,
@@ -250,7 +263,9 @@ function registerTools(server: McpServer) {
     title: "Create or update a Hevy routine",
     description:
       "Create a routine (omit routine_id) or update an existing one (pass routine_id). " +
-      "Updates replace the routine in full, so fetch it first and send the complete version. " +
+      "Updates replace the routine in full. Fetch the current version with hevy-get-routine " +
+      "first and send it back complete: that tool carries exact values, while the list " +
+      "renderings round them. " +
       "Sets support target rep_range; exercises support rest_seconds. " +
       "Two fields cannot survive that round trip. Hevy never returns routine-level notes on " +
       "reads, so pass notes explicitly to keep them. Set rpe is read-only on routines: reads " +
