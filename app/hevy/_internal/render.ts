@@ -2,8 +2,10 @@
 // block. Raw JSON wastes most of its tokens on punctuation, indentation, and
 // null padding; these renderings keep every id and metric an agent needs
 // (workout/routine ids for updates, template ids for building workouts) at
-// roughly a tenth of the pretty-printed JSON size. Exact ISO timestamps and
-// full field names remain available in structuredContent.
+// roughly a tenth of the pretty-printed JSON size. The rendering is lossy:
+// timestamps drop to local minute precision and weights round to one decimal
+// in the display unit, so the reads that feed full-replace writes send the
+// exact values as structuredContent too (see ToolSpec.roundTrip in server.ts).
 
 import type { z } from "zod";
 import type {
@@ -48,8 +50,7 @@ function present<T>(v: T | null | undefined): v is T {
 }
 
 // Display preferences (see config.ts). The API itself is always metric UTC;
-// these only affect the model-facing text. structuredContent keeps the exact
-// metric values.
+// these only affect the model-facing text.
 export interface RenderOptions {
   timeZone: string;
   units: "metric" | "imperial";

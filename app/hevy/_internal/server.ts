@@ -73,6 +73,11 @@ interface ToolSpec<Schema extends z.ZodObject<z.ZodRawShape>, Value> {
   // Text rendering for the model-facing content block. Omit to fall back to
   // compact null-stripped JSON.
   render?: (value: Value) => string;
+  // Also emit structuredContent. Set it on the reads that feed the
+  // fetch-then-full-replace write path: the rendering rounds weights to one
+  // decimal in the display unit and cuts timestamps to local minute precision,
+  // so re-saving a workout read back as text alone would drift its values.
+  roundTrip?: boolean;
 }
 
 function registerTool<Schema extends z.ZodObject<z.ZodRawShape>, Value>(
@@ -96,26 +101,34 @@ function registerTool<Schema extends z.ZodObject<z.ZodRawShape>, Value>(
     async (input, extra) => {
       const client = createHevyClient(extractUpstreamToken(extra, "Hevy API key"));
       const result = await spec.run(spec.schema.parse(input), client);
-      return toToolResult(result, spec.render);
+      return toToolResult(result, spec.render, spec.roundTrip);
     },
   );
 }
 
-function toToolResult<Value>(result: HevyResult<Value>, render?: (value: Value) => string) {
+function toToolResult<Value>(
+  result: HevyResult<Value>,
+  render?: (value: Value) => string,
+  roundTrip = false,
+) {
   if (!result.ok) {
     return {
       content: [{ type: "text" as const, text: errorMessage(result) }],
       isError: true,
     };
   }
-  // Text only, deliberately. Every tool renders prose that costs a fraction of
-  // the raw JSON, and shipping structuredContent alongside it would send the
-  // same workout twice.
-  const text = render
-    ? render(result.value)
-    : JSON.stringify(stripNulls(result.value) ?? { ok: true });
+  // Text by default. The rendering costs a fraction of the raw JSON, so sending
+  // both would ship the same workout twice. Round-trip reads are the exception:
+  // they pay for the JSON copy because the rendering is lossy (see ToolSpec).
+  const bare = stripNulls(result.value);
+  const text = render ? render(result.value) : JSON.stringify(bare ?? { ok: true });
+  const structured =
+    bare !== null && bare !== undefined && typeof bare === "object" && !Array.isArray(bare)
+      ? (bare as { [k: string]: unknown })
+      : undefined;
   return {
     content: [{ type: "text" as const, text }],
+    ...(roundTrip && structured ? { structuredContent: structured } : {}),
   };
 }
 
@@ -168,6 +181,7 @@ function registerTools(server: McpServer) {
     readOnly: true,
     run: getWorkout,
     render: (v) => renderWorkout(v, getConfig().display),
+    roundTrip: true,
   });
 
   registerTool(server, {
@@ -225,6 +239,7 @@ function registerTools(server: McpServer) {
     readOnly: true,
     run: getRoutine,
     render: (v) => renderRoutine(v, getConfig().display),
+    roundTrip: true,
   });
 
   registerTool(server, {
