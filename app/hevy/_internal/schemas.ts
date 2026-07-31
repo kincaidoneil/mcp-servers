@@ -120,6 +120,11 @@ export const WorkoutExerciseInputSchema = z.object({
   sets: z.array(WorkoutSetInputSchema).min(1).describe("Sets in order."),
 });
 
+// Hevy's read and write shapes are asymmetric, so a full-replace update cannot
+// be built purely from a fetch. is_private is write-only (POST/PUT accept it,
+// GET never returns it) and routine_id is read-only (GET returns it, the write
+// body has no field for it). Neither is a gap in our modeling; both are in the
+// upstream API, and hevy-save-workout's description warns the caller.
 export const WorkoutWriteSchema = z.object({
   title: z.string().min(1).describe("Workout title."),
   description: z.string().nullable().optional().describe("Workout description."),
@@ -178,6 +183,9 @@ export const RoutineExerciseInputSchema = z.object({
   sets: z.array(RoutineSetInputSchema).min(1).describe("Sets in order."),
 });
 
+// Same asymmetry as workouts: routine-level notes are write-only, and set rpe is
+// read-only (PutRoutinesRequestSet has no rpe field, which is why RoutineSetInputSchema
+// does not either). folder_id is create-only, so PUT leaves the routine where it is.
 export const RoutineWriteSchema = z.object({
   title: z.string().min(1).describe("Routine title."),
   notes: z.string().nullable().optional().describe("Notes for the routine."),

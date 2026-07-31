@@ -212,7 +212,10 @@ function registerTools(server: McpServer) {
     title: "Log or update a Hevy workout",
     description:
       "Log a completed workout (omit workout_id) or update an existing one (pass workout_id). " +
-      "Updates replace the workout in full — fetch it first and send the complete version. " +
+      "Updates replace the workout in full, so fetch it first and send the complete version. " +
+      "Two fields cannot survive that round trip. Hevy never returns is_private on reads, so " +
+      "pass it explicitly to keep a workout private. routine_id is read-only, so an updated " +
+      "workout cannot be relinked to the routine it came from. " +
       "There is no delete: the Hevy API cannot remove workouts. " +
       METRIC_NOTE,
     schema: SaveWorkoutInputSchema,
@@ -247,8 +250,11 @@ function registerTools(server: McpServer) {
     title: "Create or update a Hevy routine",
     description:
       "Create a routine (omit routine_id) or update an existing one (pass routine_id). " +
-      "Updates replace the routine in full — fetch it first and send the complete version. " +
+      "Updates replace the routine in full, so fetch it first and send the complete version. " +
       "Sets support target rep_range; exercises support rest_seconds. " +
+      "Two fields cannot survive that round trip. Hevy never returns routine-level notes on " +
+      "reads, so pass notes explicitly to keep them. Set rpe is read-only on routines: reads " +
+      "show it, the update API has no field for it. " +
       "There is no delete: the Hevy API cannot remove routines. " +
       METRIC_NOTE,
     schema: SaveRoutineInputSchema,
