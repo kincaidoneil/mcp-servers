@@ -25,20 +25,31 @@ export const QueryDataSourceInputSchema = z.object({
 
 export type QueryDataSourceInput = z.infer<typeof QueryDataSourceInputSchema>;
 
-export interface QueryResultRow {
-  id: string;
-  url: string;
-  title: string;
-  properties: Record<string, string>;
-  created_time: string;
-  last_edited_time: string;
-}
+// Declared as the tools' outputSchema, so keep the field types permissive:
+// the SDK hard-fails a tool call whose structuredContent doesn't parse, and
+// Notion omits url/timestamps on partial pages (we substitute "").
+export const QueryResultRowSchema = z.object({
+  id: z.string().describe("Notion page UUID."),
+  url: z.string().describe("Notion page URL. Empty when the page is inaccessible."),
+  title: z.string().describe("Rendered page title. Empty when the page has none."),
+  properties: z
+    .record(z.string(), z.string())
+    .describe("Property name to rendered value. The title property is omitted; see `title`."),
+  created_time: z.string().describe("ISO 8601 creation timestamp."),
+  last_edited_time: z.string().describe("ISO 8601 last-edit timestamp."),
+});
 
-export interface QueryResult {
-  results: QueryResultRow[];
-  next_cursor: string | null;
-  has_more: boolean;
-}
+export const QueryResultSchema = z.object({
+  results: z.array(QueryResultRowSchema),
+  next_cursor: z
+    .string()
+    .nullable()
+    .describe("Opaque cursor for the next page. Null when has_more is false."),
+  has_more: z.boolean().describe("Whether more pages match the query."),
+});
+
+export type QueryResultRow = z.infer<typeof QueryResultRowSchema>;
+export type QueryResult = z.infer<typeof QueryResultSchema>;
 
 export async function queryDataSource(
   input: QueryDataSourceInput,

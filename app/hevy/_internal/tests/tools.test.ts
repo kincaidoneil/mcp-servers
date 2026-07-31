@@ -550,13 +550,13 @@ describe("body measurement tools", () => {
 });
 
 describe("toToolResult", () => {
-  it("uses the tool's renderer for text and null-stripped JSON for structuredContent", () => {
+  it("uses the tool's renderer for text and sends no structuredContent", () => {
     const rendered = toToolResult(
       { ok: true, value: { workout_count: 42, extra: null } },
       () => "42 workouts logged",
     );
     expect(rendered.isError).toBeUndefined();
-    expect(rendered.structuredContent).toEqual({ workout_count: 42 });
+    expect(rendered).not.toHaveProperty("structuredContent");
     expect(rendered.content[0]?.text).toBe("42 workouts logged");
   });
 
@@ -568,7 +568,7 @@ describe("toToolResult", () => {
   it("renders empty ok results (measurement create) without structure errors", () => {
     const rendered = toToolResult({ ok: true, value: null });
     expect(rendered.isError).toBeUndefined();
-    expect(rendered.structuredContent).toEqual({ ok: true });
+    expect(rendered.content[0]?.text).toBe('{"ok":true}');
   });
 
   it("tells the user to reconnect on unauthorized", () => {

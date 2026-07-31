@@ -108,15 +108,14 @@ function toToolResult<Value>(result: HevyResult<Value>, render?: (value: Value) 
       isError: true,
     };
   }
-  const bare = stripNulls(result.value);
-  const structured =
-    bare !== null && bare !== undefined && typeof bare === "object" && !Array.isArray(bare)
-      ? (bare as { [k: string]: unknown })
-      : { ok: true };
-  const text = render ? render(result.value) : JSON.stringify(bare ?? { ok: true });
+  // Text only, deliberately. Every tool renders prose that costs a fraction of
+  // the raw JSON, and shipping structuredContent alongside it would send the
+  // same workout twice.
+  const text = render
+    ? render(result.value)
+    : JSON.stringify(stripNulls(result.value) ?? { ok: true });
   return {
     content: [{ type: "text" as const, text }],
-    structuredContent: structured,
   };
 }
 
