@@ -38,7 +38,7 @@ export function protectMcpHandler(
 }
 
 interface MaybeAuthInfo {
-  authInfo?: { extra?: { upstreamAccessToken?: unknown } };
+  authInfo?: { extra?: { upstreamAccessToken?: unknown; identity?: unknown } };
 }
 
 // Pull the upstream credential out of a tool handler's `extra` argument.
@@ -50,4 +50,14 @@ export function extractUpstreamToken(extra: unknown, label: string): string {
     throw new Error(`missing upstream ${label} in auth context`);
   }
   return token;
+}
+
+// Pull the identity claims (whatever the consent flow embedded in the token)
+// out of a tool handler's `extra` argument. Missing or malformed identity
+// yields an empty record; callers decide which fields they require.
+export function extractIdentity(extra: unknown): Record<string, unknown> {
+  const authInfo = (extra as MaybeAuthInfo).authInfo;
+  const identity = authInfo?.extra?.identity;
+  if (typeof identity !== "object" || identity === null || Array.isArray(identity)) return {};
+  return identity as Record<string, unknown>;
 }

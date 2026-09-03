@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // The pare MCP resource reads the built app HTML from disk at request time,
+  // so Vercel has to ship it with the route's serverless function.
+  outputFileTracingIncludes: { "/pare": ["./app/pare/_internal/ui/dist/**"] },
   // RFC 8414 / RFC 9728 specify path-aware discovery: for an issuer
   // `https://host/<bridge>`, the metadata URL is
   // `https://host/.well-known/oauth-authorization-server/<bridge>`
