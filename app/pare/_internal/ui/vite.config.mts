@@ -12,6 +12,8 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 
 const root = import.meta.dirname;
 const repoRoot = path.resolve(root, "../../../..");
+// Override so parallel checkouts can run their own harness.
+const port = Number(process.env["PARE_UI_PORT"] ?? 5173);
 
 export default defineConfig({
   root,
@@ -24,9 +26,9 @@ export default defineConfig({
     rollupOptions: { input: path.join(root, "index.html") },
   },
   server: {
-    port: 5173,
+    port,
     strictPort: true,
     fs: { allow: [repoRoot] },
   },
-  preview: { port: 5173, strictPort: true },
+  preview: { port, strictPort: true },
 });

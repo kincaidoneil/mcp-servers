@@ -4,7 +4,7 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
-const port = 5173;
+const port = Number(process.env["PARE_UI_PORT"] ?? 5173);
 
 export default defineConfig({
   testDir: "app/pare/_internal/ui/e2e",
