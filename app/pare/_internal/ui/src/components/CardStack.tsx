@@ -59,9 +59,9 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const opacity = useMotionValue(1);
-  // The card thins as it is pushed, so the outcome it is heading for shows
-  // through it, and a long drag never reaches the iframe edge opaque.
-  const dragFade = useTransform(x, [-190, -50, 0, 50, 190], [0.1, 1, 1, 1, 0.1]);
+  // The card thins a little as it is pushed and never reaches the iframe
+  // edge opaque.
+  const dragFade = useTransform(x, [-260, -60, 0, 60, 260], [0.2, 1, 1, 1, 0.2]);
   // The pull only reads while the user is moving the card, not when a card
   // slides back in after an undo.
   const gate = useMotionValue(0);
@@ -144,10 +144,10 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topId]);
 
-  // Two-finger trackpad swipes arrive as wheel events with no end event, so
-  // the gesture commits the moment it crosses the threshold and a short
-  // cooldown swallows the momentum that follows. Vertical scrolling passes
-  // through.
+  // Two-finger trackpad swipes arrive as wheel events with no end event; a
+  // short gap in the stream stands in for the fingers lifting. A cooldown
+  // after a commit swallows the momentum that follows. Vertical scrolling
+  // passes through.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
@@ -177,18 +177,22 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
       event.preventDefault();
       gate.set(1);
       // Natural scrolling: fingers moving right report a negative deltaX.
-      const next = x.get() - dx;
+      // Travel is clamped so momentum cannot overshoot, and the swipe commits
+      // only once the wheel stream stops: lifting the fingers decides, and
+      // pulling back before that cancels.
+      const limit = commitDistance() + 40;
+      const next = Math.max(-limit, Math.min(limit, x.get() - dx));
       x.set(next);
-      if (Math.abs(next) >= commitDistance()) {
-        commitSwipe(next > 0 ? 1 : -1);
-        axis = null;
-        cooldownUntil = now + 600;
-        return;
-      }
       idle = setTimeout(() => {
         axis = null;
-        settleBack();
-      }, 110);
+        const settled = x.get();
+        if (Math.abs(settled) >= commitDistance()) {
+          commitSwipe(settled > 0 ? 1 : -1);
+          cooldownUntil = performance.now() + 400;
+        } else {
+          settleBack();
+        }
+      }, 90);
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -306,7 +310,9 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
             transition={reduceMotion ? { duration: 0 } : SETTLE}
             style={{ zIndex: 10 - depth }}
             aria-hidden
-          />
+          >
+            <Card item={item} />
+          </motion.div>
         );
       })}
 

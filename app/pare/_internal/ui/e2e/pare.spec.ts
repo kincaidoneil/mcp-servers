@@ -23,30 +23,30 @@ test("keyboard: decide, note, suggestion, undo, skip, and the model's context fo
   page,
 }) => {
   const app = await open(page);
-  await expect(app.getByTestId("pare")).toBeFocused();
+  await expect(app.getByTestId("note")).toBeFocused();
 
   await page.keyboard.press("ArrowRight");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
   await expect(inContext(page, "nl-1")).toHaveAttribute("data-action", "keep");
 
-  // Typing opens the note. Inside it, bare arrows move the caret; the
-  // modifier decides.
+  // Typing is commenting. With text in the note, bare arrows move the caret;
+  // the modifier decides.
   await page.keyboard.type("only the Sunday edition");
   await expect(app.getByTestId("note")).toHaveValue("only the Sunday edition");
-  await expect(app.getByTestId("note")).toBeFocused();
   await page.keyboard.press("ArrowLeft");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
   await page.keyboard.press("Control+ArrowLeft");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-3");
   await expect(inContext(page, "nl-2")).toHaveAttribute("data-action", "dispose");
   await expect(inContext(page, "nl-2")).toContainText("only the Sunday edition");
-  await expect(app.getByTestId("note")).toHaveCount(0);
-  await expect(app.getByTestId("pare")).toBeFocused();
+  await expect(app.getByTestId("note")).toHaveValue("");
+  await expect(app.getByTestId("note")).toBeFocused();
 
-  // Enter takes the card's suggestion (nl-3 suggests dispose).
+  // Enter always keeps, whatever the card suggests (nl-3 suggests dispose).
+  await expect(app.getByTestId("suggestion-mark")).toHaveClass(/pare-mark--dispose/);
   await page.keyboard.press("Enter");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-4");
-  await expect(inContext(page, "nl-3")).toHaveAttribute("data-action", "dispose");
+  await expect(inContext(page, "nl-3")).toHaveAttribute("data-action", "keep");
 
   await page.keyboard.press("Control+z");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-3");
@@ -90,8 +90,14 @@ test("mouse drag and trackpad wheel commit past the threshold and settle back be
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
   await expect(inContext(page, "nl-1")).toHaveAttribute("data-action", "keep");
 
-  // Two-finger swipe left on a trackpad arrives as positive deltaX.
+  // Two-finger swipe left on a trackpad arrives as positive deltaX. Crossing
+  // the line is not enough: pulling back before the fingers lift cancels.
   await page.mouse.move(cx, cy);
+  for (let i = 0; i < 10; i++) await page.mouse.wheel(30, 0);
+  for (let i = 0; i < 10; i++) await page.mouse.wheel(-30, 0);
+  await page.waitForTimeout(400);
+  await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
+  // Lifting past the line commits.
   for (let i = 0; i < 10; i++) await page.mouse.wheel(30, 0);
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-3");
   await expect(inContext(page, "nl-2")).toHaveAttribute("data-action", "dispose");
@@ -124,28 +130,27 @@ test("extra actions by key, by button, and through a suggestion", async ({ page 
   await expect(top(app)).toHaveAttribute("data-item-id", "t-3");
   await expect(inContext(page, "t-2")).toHaveAttribute("data-action", "delegate");
 
-  // t-3 suggests "later"; Enter follows the suggestion.
+  // t-3 suggests "later": the suggestion is a mark, not a key. Enter keeps.
+  await expect(app.getByTestId("suggestion-mark")).toHaveClass(/pare-mark--extra/);
   await page.keyboard.press("Enter");
   await expect(top(app)).toHaveAttribute("data-item-id", "t-4");
-  await expect(inContext(page, "t-3")).toHaveAttribute("data-action", "later");
+  await expect(inContext(page, "t-3")).toHaveAttribute("data-action", "keep");
 
-  // Letters open the note and are text, never shortcuts, even ones that
-  // start with a digit-less word like "delegate".
-  await page.keyboard.type("delegate to sam");
+  // Letters are text, never shortcuts; with text present a digit is text too,
+  // and the modifier plus an arrow decides with the note attached.
+  await page.keyboard.type("delegate to sam 1");
   await expect(top(app)).toHaveAttribute("data-item-id", "t-4");
-  await expect(app.getByTestId("note")).toHaveValue("delegate to sam");
-  // Escape hands focus back to the deck with the note kept; arrows decide.
-  await page.keyboard.press("Escape");
-  await expect(app.getByTestId("pare")).toBeFocused();
-  await page.keyboard.press("ArrowRight");
-  await expect(inContext(page, "t-4")).toContainText("delegate to sam");
+  await expect(app.getByTestId("note")).toHaveValue("delegate to sam 1");
+  await page.keyboard.press("Control+ArrowRight");
+  await expect(inContext(page, "t-4")).toContainText("delegate to sam 1");
 });
 
 test("progress survives a remount from the cache, and a reopen from the model's context", async ({
   page,
 }) => {
   const app = await open(page, "terse");
-  await expect(app.getByTestId("note-open")).toHaveCount(0);
+  await expect(app.getByTestId("note")).toHaveCount(0);
+  await expect(app.getByTestId("pare")).toBeFocused();
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("ArrowLeft");
   await expect(decided(page)).toContainText("2 of 3");

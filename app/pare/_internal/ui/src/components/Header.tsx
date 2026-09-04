@@ -24,7 +24,7 @@ export function StatusBar(props: StatusBarProps) {
       <button
         type="button"
         className="pare-icon-btn"
-        title="Undo (⌘Z)"
+        data-tip="Undo · ⌘Z"
         aria-label="Undo"
         disabled={!props.canUndo}
         onMouseDown={(e) => e.preventDefault()}
@@ -37,7 +37,7 @@ export function StatusBar(props: StatusBarProps) {
         <button
           type="button"
           className="pare-icon-btn"
-          title={props.fullscreen ? "Exit full screen" : "Full screen"}
+          data-tip={props.fullscreen ? "Exit full screen" : "Full screen"}
           aria-label={props.fullscreen ? "Exit full screen" : "Full screen"}
           onMouseDown={(e) => e.preventDefault()}
           onClick={props.onToggleFullscreen}
@@ -88,6 +88,7 @@ export function Menu({ items }: { items: MenuItem[] }) {
       <button
         type="button"
         className="pare-icon-btn"
+        data-tip="More"
         aria-label="More actions"
         aria-expanded={open}
         onMouseDown={(e) => e.preventDefault()}

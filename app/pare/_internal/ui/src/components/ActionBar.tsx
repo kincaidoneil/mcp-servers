@@ -1,7 +1,8 @@
 // The actions around the slide. The two outcomes sit at the left and right of
-// the card in their colors, and grow toward the card as it is dragged their
-// way. Later, the extra actions, and the note trigger sit under the card as
-// dim text with digits. The action Enter fires carries a return glyph.
+// the card in their colors and brighten as the card is dragged their way.
+// Later and the extra actions sit under the card as dim text with digits.
+// The suggested action carries an amber dot; amber means "suggested" and
+// nothing else. Every control names its key in a hover tooltip.
 
 import { motion, useTransform, type MotionValue } from "motion/react";
 import { DISPOSE, KEEP, type SessionConfig } from "../../../schema";
@@ -11,36 +12,34 @@ const stop = (e: React.MouseEvent) => e.preventDefault();
 interface SideActionProps {
   kind: "keep" | "dispose";
   config: SessionConfig;
-  // Whether Enter fires this action for the current card.
-  isEnter: boolean;
+  suggested: boolean;
   // 0 at rest, 1 when the card has reached this side's commit distance.
   pull: MotionValue<number>;
   onAction: (actionId: string) => void;
 }
 
-export function SideAction({ kind, config, isEnter, pull, onAction }: SideActionProps) {
+export function SideAction({ kind, config, suggested, pull, onAction }: SideActionProps) {
   const action = kind === "keep" ? config.keep : config.dispose;
   const id = kind === "keep" ? KEEP : DISPOSE;
-  const rest = isEnter ? 1 : 0.55;
-  const opacity = useTransform(pull, [0, 1], [rest, 1]);
-  const scale = useTransform(pull, [0, 1], [1, 1.14]);
-  const x = useTransform(pull, [0, 1], [0, kind === "keep" ? -10 : 10]);
+  const opacity = useTransform(pull, [0, 1], [0.8, 1]);
+  const keys = kind === "keep" ? "→ or Enter" : "←";
   return (
     <div className={`pare-side pare-side--${kind}`}>
       <motion.button
         type="button"
-        className={"pare-side__btn" + (isEnter ? " is-enter" : "")}
-        style={{ opacity, scale, x }}
-        title={action.hint}
+        className="pare-side__btn"
+        style={{ opacity }}
+        data-tip={action.hint ? `${keys} · ${action.hint}` : keys}
+        aria-label={`${action.label}, ${keys}`}
         onMouseDown={stop}
         onClick={() => onAction(id)}
         data-testid={`action-${kind}`}
       >
         <span className="pare-side__arrow" aria-hidden>
           {kind === "keep" ? "→" : "←"}
+          {suggested && <SuggestedDot />}
         </span>
         <span className="pare-side__label">{action.label}</span>
-        {isEnter && <EnterMark />}
       </motion.button>
     </div>
   );
@@ -49,25 +48,22 @@ export function SideAction({ kind, config, isEnter, pull, onAction }: SideAction
 interface ExtraActionsProps {
   config: SessionConfig;
   canSkip: boolean;
-  // The id of the action Enter fires, so an extra action can carry the mark.
-  enterAction: string;
+  suggestedAction: string | undefined;
   onAction: (actionId: string) => void;
   onSkip: () => void;
-  // Rendered last: the note trigger, when notes are on and the note is closed.
-  noteTrigger?: React.ReactNode;
 }
 
 export function ExtraActions(props: ExtraActionsProps) {
   const { config } = props;
-  const hasAny = config.skip || config.extra_actions.length > 0 || props.noteTrigger;
-  if (!hasAny) return null;
+  if (!config.skip && config.extra_actions.length === 0) return null;
   return (
     <div className="pare-extras" role="group" aria-label="More actions">
       {config.skip && (
         <button
           type="button"
           className="pare-extra"
-          title="Move to the bottom of the stack"
+          data-tip="↓ · move to the bottom of the deck"
+          aria-label="Later, down arrow"
           disabled={!props.canSkip}
           onMouseDown={stop}
           onClick={props.onSkip}
@@ -79,35 +75,28 @@ export function ExtraActions(props: ExtraActionsProps) {
           Later
         </button>
       )}
-      {config.extra_actions.map((action, i) => {
-        const isEnter = props.enterAction === action.id;
-        return (
-          <button
-            key={action.id}
-            type="button"
-            className={"pare-extra" + (isEnter ? " is-enter" : "")}
-            title={action.hint}
-            onMouseDown={stop}
-            onClick={() => props.onAction(action.id)}
-            data-testid={`action-${action.id}`}
-          >
-            <span className="pare-extra__key" aria-hidden>
-              {i + 1}
-            </span>
-            {action.label}
-            {isEnter && <EnterMark />}
-          </button>
-        );
-      })}
-      {props.noteTrigger}
+      {config.extra_actions.map((action, i) => (
+        <button
+          key={action.id}
+          type="button"
+          className="pare-extra"
+          data-tip={action.hint ? `${i + 1} · ${action.hint}` : `${i + 1}`}
+          aria-label={`${action.label}, ${i + 1}`}
+          onMouseDown={stop}
+          onClick={() => props.onAction(action.id)}
+          data-testid={`action-${action.id}`}
+        >
+          <span className="pare-extra__key" aria-hidden>
+            {i + 1}
+          </span>
+          {action.label}
+          {props.suggestedAction === action.id && <SuggestedDot />}
+        </button>
+      ))}
     </div>
   );
 }
 
-export function EnterMark() {
-  return (
-    <span className="pare-enter" aria-label="Enter">
-      ↵
-    </span>
-  );
+function SuggestedDot() {
+  return <span className="pare-suggested" title="Suggested" aria-label="suggested" />;
 }

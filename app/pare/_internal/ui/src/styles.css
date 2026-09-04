@@ -26,6 +26,11 @@
   --keep-ink: #2b7a4b;
   --dispose: #f0877a; /* 7.5:1 on the table */
   --dispose-ink: #b43d2e;
+  /* Amber means "suggested" and nothing else. */
+  --amber: #e5b356;
+  --amber-ink: #b8862e;
+
+  --card-h: 272px;
 
   --radius: 5px;
   --shadow-slide: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 28px -10px rgba(0, 0, 0, 0.6);
@@ -81,12 +86,43 @@ a {
 /* ---- Layout -------------------------------------------------------------- */
 
 .pare {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   background: var(--table);
   border-radius: 10px;
   padding: 28px 20px 12px;
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* A soft light rises from the side the card is pushed toward. */
+.pare-glow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.pare-glow--dispose {
+  left: 0;
+  background: radial-gradient(
+    ellipse 70% 90% at 0% 50%,
+    rgba(240, 135, 122, 0.32),
+    transparent 70%
+  );
+}
+
+.pare-glow--keep {
+  right: 0;
+  background: radial-gradient(
+    ellipse 70% 90% at 100% 50%,
+    rgba(127, 207, 154, 0.32),
+    transparent 70%
+  );
 }
 
 .pare:focus {
@@ -98,6 +134,7 @@ a {
   border-radius: 0;
   padding: 48px 32px 24px;
   justify-content: center;
+  --card-h: 320px;
 }
 
 .pare-status {
@@ -150,7 +187,6 @@ a {
   line-height: 1.25;
   text-align: center;
   text-wrap: balance;
-  transform-origin: center;
   transition: background-color 120ms;
 }
 
@@ -159,9 +195,17 @@ a {
 }
 
 .pare-side__arrow {
+  position: relative;
   font-size: 22px;
   line-height: 1;
   margin-bottom: 4px;
+}
+
+.pare-side__arrow .pare-suggested {
+  position: absolute;
+  top: -2px;
+  right: -12px;
+  margin: 0;
 }
 
 .pare-side--dispose .pare-side__btn {
@@ -172,17 +216,45 @@ a {
   color: var(--keep);
 }
 
-.pare-enter {
-  display: inline-grid;
-  place-items: center;
-  width: 20px;
-  height: 16px;
-  border: 1px solid currentColor;
-  border-radius: 3px;
+.pare-suggested {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  margin-left: 7px;
+  vertical-align: 1px;
+}
+
+/* Hover tooltips name the key for every control. */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  translate: -50% 0;
+  white-space: nowrap;
   font-size: 11px;
-  line-height: 1;
-  margin-top: 6px;
-  opacity: 0.85;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #000;
+  color: var(--light);
+  pointer-events: none;
+  z-index: 40;
+}
+
+.pare-foot [data-tip]:hover::after,
+.pare-foot [data-tip]:focus-visible::after {
+  left: auto;
+  right: 0;
+  translate: 0 0;
 }
 
 .pare-slide-col {
@@ -200,13 +272,16 @@ a {
 }
 
 .pare-card {
+  height: var(--card-h);
+  display: flex;
+  flex-direction: column;
   border-radius: var(--radius);
   background: var(--slide);
   box-shadow:
     0 0 0 1px var(--mount),
     var(--shadow-slide);
   color: var(--ink);
-  padding: 22px 26px 20px;
+  padding: 22px 26px 18px;
   position: relative;
   overflow: hidden;
   will-change: transform;
@@ -229,12 +304,14 @@ a {
   left: 0;
   right: 0;
   top: 0;
-  bottom: 12px;
   background: var(--slide-behind);
   box-shadow: 0 0 0 1px var(--mount);
-  padding: 0;
   pointer-events: none;
   transform-origin: 50% 100%;
+}
+
+.pare-card--behind > * {
+  opacity: 0.6;
 }
 
 .pare-card--ghost {
@@ -264,20 +341,48 @@ a {
   border-bottom-color: var(--ink);
 }
 
-/* Source and facts as one quiet line. */
-.pare-card__meta {
-  margin: 6px 0 0;
+.pare-card__source {
+  margin: 4px 0 0;
   font-size: 13px;
   line-height: 1.45;
   color: var(--ink-3);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Facts pin to the bottom edge, so they land in the same place on every card. */
+.pare-facts {
+  margin: 12px 0 0;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(28, 27, 24, 0.1);
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 16px;
+  row-gap: 3px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.pare-facts__row {
+  display: contents;
+}
+
+.pare-facts dt {
+  color: var(--ink-3);
+}
+
+.pare-facts dd {
+  margin: 0;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pare-card__body {
-  margin-top: 14px;
+  margin-top: 12px;
   font-size: 15px;
   line-height: 1.5;
   color: var(--ink-2);
@@ -327,13 +432,13 @@ a {
 .pare-mark--dispose {
   left: 0;
   border-radius: 0 2px 2px 0;
-  background: var(--dispose-ink);
+  background: var(--amber-ink);
 }
 
 .pare-mark--keep {
   right: 0;
   border-radius: 2px 0 0 2px;
-  background: var(--keep-ink);
+  background: var(--amber-ink);
 }
 
 .pare-mark--extra {
@@ -344,7 +449,7 @@ a {
   width: 36px;
   height: 4px;
   border-radius: 2px 2px 0 0;
-  background: var(--ink-3);
+  background: var(--amber-ink);
 }
 
 /* ---- Under the slide ----------------------------------------------------- */
@@ -389,14 +494,6 @@ a {
   cursor: default;
 }
 
-.pare-extra.is-enter {
-  color: var(--light);
-}
-
-.pare-extra.is-enter .pare-enter {
-  margin: 0 0 0 2px;
-}
-
 .pare-extra__key {
   font-size: 11px;
   color: var(--light-3);
@@ -407,7 +504,7 @@ a {
 /* ---- Note ---------------------------------------------------------------- */
 
 .pare-note {
-  margin-top: 6px;
+  margin-top: 2px;
 }
 
 .pare-note textarea {

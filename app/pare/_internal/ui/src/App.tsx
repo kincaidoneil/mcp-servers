@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { applyDocumentTheme, type McpUiDisplayMode } from "@modelcontextprotocol/ext-apps";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
-import { useMotionValue, useTransform } from "motion/react";
+import { motion, useMotionValue, useTransform } from "motion/react";
 import { z } from "zod";
 import {
   DISPOSE,
@@ -137,11 +137,6 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const [note, setNote] = useState("");
   const noteRef = useRef("");
   noteRef.current = note;
-  // The note field appears on the first typed letter and stays until the
-  // card is decided, so the deck keeps keyboard focus the rest of the time.
-  const [noteOpen, setNoteOpen] = useState(false);
-  const noteOpenRef = useRef(false);
-  noteOpenRef.current = noteOpen;
   // How far the card is pulled toward a side, written by the stack and read
   // by the side actions.
   const pull = useMotionValue(0);
@@ -189,28 +184,12 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
 
   // ---- Decisions ------------------------------------------------------------
 
-  // Keyboard shortcuts need focus inside the iframe; the app root holds it.
-  const focusRoot = () => rootRef.current?.focus({ preventScroll: true });
-  const focusNoteEnd = () => {
-    const el = noteInput.current;
-    if (!el) return;
-    el.focus({ preventScroll: true });
-    el.setSelectionRange(el.value.length, el.value.length);
-  };
+  // Keyboard shortcuts need focus inside the iframe. The note field holds it
+  // when there is one, so typing is commenting; otherwise the app root does.
+  const focusRoot = () => (noteInput.current ?? rootRef.current)?.focus({ preventScroll: true });
   const resetCard = () => {
     setNote("");
-    setNoteOpen(false);
     focusRoot();
-  };
-  const openNote = (text: string) => {
-    if (noteOpenRef.current) {
-      // Letters can land before the field takes focus; append them.
-      setNote((n) => n + text);
-    } else {
-      setNoteOpen(true);
-      setNote(text);
-    }
-    setTimeout(focusNoteEnd, 0);
   };
 
   const act = useCallback(
@@ -278,9 +257,9 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   }, [displayMode, host, onDisplayMode]);
 
   // ---- Keyboard -------------------------------------------------------------
-  // With the deck focused: arrows and Enter decide, digits pick extra actions,
-  // any other printable key opens the note. Inside the note: Enter decides,
-  // modifier plus arrow decides, Escape returns to the deck.
+  // "Yes, no, comment": right arrow or Enter keeps, left arrow disposes, and
+  // typing is the comment. While the note has text, bare arrows and digits
+  // belong to the text and the modifier makes them decide.
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -291,49 +270,28 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       const typingElsewhere =
         !inNote && target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(target.tagName);
       if (typingElsewhere) return;
+      const empty = noteRef.current.length === 0;
+      const free = !inNote || empty;
       const mod = e.metaKey || e.ctrlKey;
       const config = current.session.config;
-      const top = itemById(current, current.session.queue[0]);
-      const confirmAction = top?.suggestion?.action ?? KEEP;
       const handle = (fn: () => void) => {
         e.preventDefault();
         fn();
       };
 
-      if (inNote) {
-        if (e.key === "Enter" && !e.shiftKey) return handle(() => act(confirmAction));
-        if (e.key === "ArrowRight" && mod) return handle(() => act(KEEP));
-        if (e.key === "ArrowLeft" && mod) return handle(() => act(DISPOSE));
-        if (e.key === "ArrowDown" && mod && config.skip) return handle(skipTop);
-        if (e.key === "Escape") {
-          return handle(() => {
-            if (noteRef.current.trim().length === 0) setNoteOpen(false);
-            focusRoot();
-          });
-        }
-        return;
-      }
-
-      if (e.key === "ArrowRight") return handle(() => act(KEEP));
-      if (e.key === "ArrowLeft") return handle(() => act(DISPOSE));
-      if (e.key === "Enter") return handle(() => act(confirmAction));
-      if (e.key === "ArrowDown" && config.skip) return handle(skipTop);
-      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey) return handle(undo);
-      if (mod || e.altKey || e.key.length !== 1) return;
-      if (/^[1-4]$/.test(e.key)) {
+      if (e.key === "ArrowRight" && (mod || free)) return handle(() => act(KEEP));
+      if (e.key === "ArrowLeft" && (mod || free)) return handle(() => act(DISPOSE));
+      if (e.key === "Enter" && !e.shiftKey) return handle(() => act(KEEP));
+      if (e.key === "ArrowDown" && (mod || free) && config.skip) return handle(skipTop);
+      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey && free) return handle(undo);
+      if (e.key === "Escape" && inNote && !empty) return handle(() => setNote(""));
+      if (!mod && !e.altKey && free && /^[1-4]$/.test(e.key)) {
         const extra = config.extra_actions[Number(e.key) - 1];
         if (extra) return handle(() => act(extra.id));
-        return;
-      }
-      // A space alone does not open a note, but once one is open every
-      // printable key belongs to it, even before the field takes focus.
-      if (config.notes && (e.key !== " " || noteOpenRef.current)) {
-        return handle(() => openNote(e.key));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [act, skipTop, undo]);
 
   // Focus the deck once it is on screen.
@@ -353,7 +311,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const { decided, total } = S.progress(session);
   const fullscreen = displayMode === "fullscreen";
   const remaining = session.queue.length;
-  const enterAction = top?.suggestion?.action ?? KEEP;
+  const suggested = top?.suggestion?.action;
 
   const menu = (
     <Menu
@@ -389,11 +347,13 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     >
       {top ? (
         <>
+          <motion.div className="pare-glow pare-glow--dispose" style={{ opacity: disposePull }} />
+          <motion.div className="pare-glow pare-glow--keep" style={{ opacity: keepPull }} />
           <div className="pare-table">
             <SideAction
               kind="dispose"
               config={config}
-              isEnter={enterAction === DISPOSE}
+              suggested={suggested === DISPOSE}
               pull={disposePull}
               onAction={(id) => act(id)}
             />
@@ -407,14 +367,12 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 onOpenLink={(url) => void host.openLink(url)}
                 apiRef={stackApi}
               />
-              {config.notes && noteOpen && (
-                <NoteField value={note} onChange={setNote} inputRef={noteInput} />
-              )}
+              {config.notes && <NoteField value={note} onChange={setNote} inputRef={noteInput} />}
             </div>
             <SideAction
               kind="keep"
               config={config}
-              isEnter={enterAction === KEEP}
+              suggested={suggested === KEEP}
               pull={keepPull}
               onAction={(id) => act(id)}
             />
@@ -423,22 +381,9 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
             <ExtraActions
               config={config}
               canSkip={remaining > 1}
-              enterAction={enterAction}
+              suggestedAction={suggested}
               onAction={(id) => act(id)}
               onSkip={skipTop}
-              noteTrigger={
-                config.notes && !noteOpen ? (
-                  <button
-                    type="button"
-                    className="pare-extra pare-note-open"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => openNote("")}
-                    data-testid="note-open"
-                  >
-                    Note
-                  </button>
-                ) : undefined
-              }
             />
           </div>
         </>

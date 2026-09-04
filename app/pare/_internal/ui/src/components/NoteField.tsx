@@ -6,8 +6,8 @@ interface NoteFieldProps {
   inputRef: RefObject<HTMLTextAreaElement | null>;
 }
 
-// A single line under the slide that grows with the text. It appears on the
-// first typed letter and closes with the card.
+// A single line under the slide that grows with the text. It is always there
+// and always focused, so typing is commenting; it clears with the card.
 export function NoteField({ value, onChange, inputRef }: NoteFieldProps) {
   useLayoutEffect(() => {
     const el = inputRef.current;
@@ -28,7 +28,7 @@ export function NoteField({ value, onChange, inputRef }: NoteFieldProps) {
         ref={inputRef}
         rows={1}
         value={value}
-        placeholder="Note"
+        placeholder="Add a note"
         aria-label="Note for this item"
         spellCheck
         onChange={(e) => onChange(e.target.value)}
