@@ -36,7 +36,7 @@ export function Summary(props: SummaryProps) {
         {props.sent === "final" ? null : (
           <button
             type="button"
-            className="pare-btn pare-btn--primary"
+            className="pare-btn--primary"
             disabled={props.sending || !props.canSend}
             title={props.canSend ? undefined : "This host cannot receive messages from apps"}
             onClick={props.onSend}
@@ -49,7 +49,7 @@ export function Summary(props: SummaryProps) {
 
       {props.sent === "final" && (
         <div className="pare-sent" data-testid="sent">
-          Sent to the chat. Change your mind on anything below and it will ask you to send again.
+          Sent to the chat. Revisit anything below to change it, then send again.
         </div>
       )}
       {props.sendError && (
@@ -59,7 +59,10 @@ export function Summary(props: SummaryProps) {
       )}
 
       {groups.map((group) => (
-        <section key={group.actionId} className="pare-summary__group">
+        <section
+          key={group.actionId}
+          className={`pare-summary__group pare-summary__group--${group.actionId}`}
+        >
           <h3>
             {group.label} <span>{group.items.length}</span>
           </h3>

@@ -13,7 +13,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "52 in the last year" },
       { label: "Last opened", value: "7 months ago" },
     ],
-    tags: ["finance"],
     suggestion: { action: "dispose", reason: "Rarely opened" },
   },
   {
@@ -25,7 +24,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "12 in the last year" },
       { label: "Last opened", value: "3 days ago" },
     ],
-    tags: ["design"],
     suggestion: { action: "keep", reason: "Opened most issues" },
   },
   {
@@ -37,7 +35,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "361 in the last year" },
       { label: "Last opened", value: "never" },
     ],
-    tags: ["shopping"],
     suggestion: { action: "dispose", reason: "Never opened, 361 sends" },
   },
   {
@@ -49,7 +46,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "26 in the last year" },
       { label: "Last opened", value: "2 weeks ago" },
     ],
-    tags: ["outdoors"],
     suggestion: { action: "keep", reason: "Actionable and seasonal" },
   },
   {
@@ -73,7 +69,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Last opened", value: "yesterday" },
       { label: "Click-through", value: "21%" },
     ],
-    tags: ["reading"],
     suggestion: { action: "keep", reason: "Read most weeks" },
   },
   {
@@ -107,7 +102,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "26 in the last year" },
       { label: "Last opened", value: "5 days ago" },
     ],
-    tags: ["hardware"],
     suggestion: { action: "keep" },
   },
   {
@@ -141,7 +135,6 @@ const newsletterItems: SessionConfigInput["items"] = [
       { label: "Received", value: "6 in the last year" },
       { label: "Last opened", value: "3 weeks ago" },
     ],
-    tags: ["security"],
     suggestion: { action: "keep", reason: "Operationally relevant" },
   },
 ];

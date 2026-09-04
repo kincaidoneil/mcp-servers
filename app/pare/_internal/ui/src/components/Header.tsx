@@ -1,9 +1,10 @@
+// The status row under the deck: count, undo, fullscreen, and the menu. Dim
+// until hovered; nothing here is needed to make a decision.
+
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ExpandIcon, MoreIcon, UndoIcon } from "./icons";
 
-interface HeaderProps {
-  title: string;
-  description?: string;
+interface StatusBarProps {
   decided: number;
   total: number;
   canUndo: boolean;
@@ -14,52 +15,38 @@ interface HeaderProps {
   menu?: ReactNode;
 }
 
-export function Header(props: HeaderProps) {
-  const { decided, total } = props;
-  const pct = total === 0 ? 0 : Math.round((decided / total) * 100);
+export function StatusBar(props: StatusBarProps) {
   return (
-    <>
-      <header className="pare-header">
-        <div className="pare-header__text">
-          <h1 className="pare-header__title">{props.title}</h1>
-          {props.description && <p className="pare-header__desc">{props.description}</p>}
-        </div>
-        <div className="pare-header__side">
-          <span className="pare-count" data-testid="progress">
-            <b>{decided}</b> of {total}
-          </span>
-          <button
-            type="button"
-            className="pare-icon-btn"
-            title="Undo (⌘Z)"
-            aria-label="Undo"
-            disabled={!props.canUndo}
-            style={{ opacity: props.canUndo ? 1 : 0.35 }}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={props.onUndo}
-            data-testid="undo"
-          >
-            <UndoIcon />
-          </button>
-          {props.canFullscreen && (
-            <button
-              type="button"
-              className="pare-icon-btn"
-              title={props.fullscreen ? "Exit full screen" : "Full screen"}
-              aria-label={props.fullscreen ? "Exit full screen" : "Full screen"}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={props.onToggleFullscreen}
-            >
-              <ExpandIcon active={props.fullscreen} />
-            </button>
-          )}
-          {props.menu}
-        </div>
-      </header>
-      <div className="pare-bar" aria-hidden>
-        <div className="pare-bar__fill" style={{ width: `${pct}%` }} />
-      </div>
-    </>
+    <div className="pare-foot">
+      <span className="pare-count" data-testid="progress">
+        <b>{props.decided}</b> of {props.total}
+      </span>
+      <button
+        type="button"
+        className="pare-icon-btn"
+        title="Undo (⌘Z)"
+        aria-label="Undo"
+        disabled={!props.canUndo}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={props.onUndo}
+        data-testid="undo"
+      >
+        <UndoIcon />
+      </button>
+      {props.canFullscreen && (
+        <button
+          type="button"
+          className="pare-icon-btn"
+          title={props.fullscreen ? "Exit full screen" : "Full screen"}
+          aria-label={props.fullscreen ? "Exit full screen" : "Full screen"}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={props.onToggleFullscreen}
+        >
+          <ExpandIcon active={props.fullscreen} />
+        </button>
+      )}
+      {props.menu}
+    </div>
   );
 }
 

@@ -18,8 +18,9 @@ const START_DESCRIPTION =
   "Open a card-stack triage session in the pare app for many small keep-or-dispose " +
   "decisions: which newsletters to unsubscribe from, which tasks to delete, which files to " +
   "archive. Each item is one card. Give every card a short title, a subtitle for the source " +
-  "(sender, project, folder), and a body with enough context to decide in a few seconds; use " +
-  "meta for facts like 'Last opened: 14 months ago'. Set the keep and dispose labels to the " +
+  "(sender, project, folder), and a body of one to three short sentences with enough context " +
+  "to decide in a few seconds (the card never expands); use meta for up to three facts like " +
+  "'Last opened: 14 months ago'. Set the keep and dispose labels to the " +
   "concrete verbs for this task ('Stay subscribed' / 'Unsubscribe'). Add extra_actions only " +
   "when the task has a third bucket (Snooze, Delegate, Later). Put your recommendation in " +
   "suggestion with a one-line reason; the user decides. Up to 500 items; batch a large list " +

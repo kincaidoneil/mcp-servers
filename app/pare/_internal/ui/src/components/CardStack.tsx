@@ -1,6 +1,7 @@
 // The deck. Owns every bit of motion: pointer drag, two-finger trackpad
-// swipes, keyboard-triggered exits, the cards settling up the stack, and the
-// card that slides back in after an undo.
+// swipes, keyboard-triggered exits, and the card that slides back in after
+// an undo. It also reports how far the card has been pulled toward either
+// side, so the side actions and the card's edge can answer.
 //
 // Decisions are committed the moment a gesture crosses the threshold. The
 // leaving card becomes a detached "ghost" that finishes its flight while the
@@ -12,66 +13,58 @@ import {
   animate,
   motion,
   useMotionValue,
+  useMotionValueEvent,
   useReducedMotion,
   useTransform,
   type MotionValue,
 } from "motion/react";
-import { DISPOSE, KEEP, type Item, type SessionConfig } from "../../../schema";
+import { DISPOSE, KEEP, type Item } from "../../../schema";
 import { Card } from "./Card";
 
 export type ExitKind = "keep" | "dispose" | "skip" | "fade";
 
 export interface StackApi {
   // Animate `itemId` off the deck. The caller updates state in the same tick.
-  exit(itemId: string, kind: ExitKind, label?: string): void;
-  // Whether the top card's body is clamped, so expanding would show more.
-  canExpand(): boolean;
+  exit(itemId: string, kind: ExitKind): void;
 }
 
 interface CardStackProps {
   items: Item[];
-  config: SessionConfig;
-  expanded: boolean;
-  onToggleExpanded: () => void;
   onSwipe: (itemId: string, action: typeof KEEP | typeof DISPOSE) => void;
   onOpenLink: (url: string) => void;
   apiRef: MutableRefObject<StackApi | null>;
+  // Written by the stack: -1 fully toward dispose, 1 fully toward keep.
+  pull: MotionValue<number>;
 }
 
 interface Ghost {
   key: number;
   item: Item;
   kind: ExitKind;
-  label: string;
   fromX: number;
   fromY: number;
+  fromOpacity: number;
 }
 
 const VISIBLE_BEHIND = 2;
-const STAMP_DISTANCE = 110;
+const PULL_DISTANCE = 110;
 const FLY_DURATION = 0.34;
 const EASE_OUT = [0.2, 0, 0, 1] as const;
 const SPRING = { type: "spring", stiffness: 520, damping: 42, mass: 0.9 } as const;
 const SETTLE = { type: "spring", stiffness: 420, damping: 38 } as const;
 
-export function CardStack({
-  items,
-  config,
-  expanded,
-  onToggleExpanded,
-  onSwipe,
-  onOpenLink,
-  apiRef,
-}: CardStackProps) {
+export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStackProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const reduceMotion = useReducedMotion() ?? false;
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const opacity = useMotionValue(1);
-  // Stamps show only while the user is moving the card, not when a card
+  // The card thins as it is pushed, so the outcome it is heading for shows
+  // through it, and a long drag never reaches the iframe edge opaque.
+  const dragFade = useTransform(x, [-190, -50, 0, 50, 190], [0.1, 1, 1, 1, 0.1]);
+  // The pull only reads while the user is moving the card, not when a card
   // slides back in after an undo.
-  const stampGate = useMotionValue(0);
-  const topOverflows = useRef(false);
+  const gate = useMotionValue(0);
   const [ghosts, setGhosts] = useState<Ghost[]>([]);
   const [dragging, setDragging] = useState(false);
   const ghostSeq = useRef(0);
@@ -86,7 +79,7 @@ export function CardStack({
   const latest = useRef({ items, onSwipe });
   latest.current = { items, onSwipe };
 
-  function launchGhost(itemId: string, kind: ExitKind, label: string) {
+  function launchGhost(itemId: string, kind: ExitKind) {
     const item = latest.current.items.find((i) => i.id === itemId);
     if (!item) return;
     const isTop = latest.current.items[0]?.id === itemId;
@@ -97,38 +90,30 @@ export function CardStack({
         key: ++ghostSeq.current,
         item,
         kind,
-        label,
         fromX: isTop ? x.get() : 0,
         fromY: isTop ? y.get() : 0,
+        fromOpacity: isTop ? dragFade.get() : 1,
       },
     ]);
     if (isTop) {
-      stampGate.set(0);
+      gate.set(0);
       x.jump(0);
       y.jump(0);
     }
   }
 
-  apiRef.current = {
-    canExpand: () => topOverflows.current,
-    exit: (itemId, kind, label) =>
-      launchGhost(
-        itemId,
-        kind,
-        label ?? (kind === "keep" ? config.keep.label : config.dispose.label),
-      ),
-  };
+  apiRef.current = { exit: launchGhost };
 
   function commitSwipe(direction: 1 | -1) {
     const item = latest.current.items[0];
     if (!item) return;
     const action = direction > 0 ? KEEP : DISPOSE;
-    launchGhost(item.id, action, action === KEEP ? config.keep.label : config.dispose.label);
+    launchGhost(item.id, action);
     latest.current.onSwipe(item.id, action);
   }
 
   function settleBack() {
-    stampGate.set(0);
+    gate.set(0);
     if (reduceMotion) {
       x.jump(0);
       y.jump(0);
@@ -162,7 +147,7 @@ export function CardStack({
   // Two-finger trackpad swipes arrive as wheel events with no end event, so
   // the gesture commits the moment it crosses the threshold and a short
   // cooldown swallows the momentum that follows. Vertical scrolling passes
-  // through to the card body.
+  // through.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
@@ -190,7 +175,7 @@ export function CardStack({
         return;
       }
       event.preventDefault();
-      stampGate.set(1);
+      gate.set(1);
       // Natural scrolling: fingers moving right report a negative deltaX.
       const next = x.get() - dx;
       x.set(next);
@@ -215,7 +200,7 @@ export function CardStack({
   }, []);
 
   // Pointer drag on the top card. Horizontal intent is required before the
-  // card follows, so vertical gestures can scroll an expanded body.
+  // card follows.
   const drag = useRef<{
     pointerId: number;
     startX: number;
@@ -252,7 +237,7 @@ export function CardStack({
         d.active = true;
         event.currentTarget.setPointerCapture(event.pointerId);
         setDragging(true);
-        stampGate.set(1);
+        gate.set(1);
       } else if (Math.abs(dy) > 10) {
         drag.current = null;
         return;
@@ -292,20 +277,24 @@ export function CardStack({
     }
   }
 
-  const rotate = useTransform(x, [-320, 320], [-11, 11]);
-  // Past the commit distance the card dissolves, so a long drag never shows
-  // it clipped at the iframe edge.
-  const dragFade = useTransform(x, [-340, -150, 0, 150, 340], [0, 1, 1, 1, 0]);
+  const rotate = useTransform(x, [-320, 320], [-9, 9]);
+  // The card thins as it is pushed, so the outcome it is heading for shows
+  // through it, and a long drag never reaches the iframe edge opaque.
   const topOpacity = useTransform(() => dragFade.get() * opacity.get());
-  const keepBase = useTransform(x, [16, STAMP_DISTANCE], [0, 1]);
-  const disposeBase = useTransform(x, [-STAMP_DISTANCE, -16], [1, 0]);
-  const keepStamp = useTransform(() => keepBase.get() * stampGate.get());
-  const disposeStamp = useTransform(() => disposeBase.get() * stampGate.get());
+  const signedPull = useTransform(
+    () => Math.max(-1, Math.min(1, x.get() / PULL_DISTANCE)) * gate.get(),
+  );
+  useMotionValueEvent(signedPull, "change", (value) => pull.set(value));
+  const keepEdge = useTransform(signedPull, [0, 1], [0, 1]);
+  const disposeEdge = useTransform(signedPull, [-1, 0], [1, 0]);
 
   const behind = items.slice(1, 1 + VISIBLE_BEHIND);
+  const suggestion = top?.suggestion;
+  const suggestedKind =
+    suggestion?.action === KEEP ? "keep" : suggestion?.action === DISPOSE ? "dispose" : "extra";
 
   return (
-    <div ref={stageRef} className={"pare-stage" + (expanded ? " pare-stage--expanded" : "")}>
+    <div ref={stageRef} className="pare-stage">
       {behind.toReversed().map((item, i) => {
         const depth = behind.length - i;
         return (
@@ -313,13 +302,11 @@ export function CardStack({
             key={item.id}
             className="pare-card pare-card--behind"
             initial={false}
-            animate={{ scale: 1 - depth * 0.035, y: depth * 11 }}
+            animate={{ scale: 1 - depth * 0.03, y: depth * 6 }}
             transition={reduceMotion ? { duration: 0 } : SETTLE}
             style={{ zIndex: 10 - depth }}
             aria-hidden
-          >
-            <Card item={item} config={config} expanded={false} />
-          </motion.div>
+          />
         );
       })}
 
@@ -327,7 +314,7 @@ export function CardStack({
         <motion.div
           key={top.id}
           className={"pare-card pare-card--top" + (dragging ? " is-dragging" : "")}
-          style={{ x, y, rotate, opacity: topOpacity, zIndex: 10 }}
+          style={{ x, y, rotate, opacity: topOpacity }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={(e) => endDrag(e, false)}
@@ -341,16 +328,19 @@ export function CardStack({
           data-testid="top-card"
           data-item-id={top.id}
         >
-          <Card
-            item={top}
-            config={config}
-            expanded={expanded}
-            onToggleExpanded={onToggleExpanded}
-            onOpenLink={onOpenLink}
-            onOverflow={(value) => (topOverflows.current = value)}
-          >
-            <Stamp kind="keep" label={config.keep.label} opacity={keepStamp} />
-            <Stamp kind="dispose" label={config.dispose.label} opacity={disposeStamp} />
+          <Card item={top} onOpenLink={onOpenLink}>
+            {suggestion && (
+              <span
+                className={`pare-mark pare-mark--${suggestedKind}`}
+                title={suggestion.reason ? `Suggested. ${suggestion.reason}` : "Suggested"}
+                data-testid="suggestion-mark"
+              />
+            )}
+            <motion.span
+              className="pare-edge pare-edge--dispose"
+              style={{ opacity: disposeEdge }}
+            />
+            <motion.span className="pare-edge pare-edge--keep" style={{ opacity: keepEdge }} />
           </Card>
         </motion.div>
       )}
@@ -359,7 +349,6 @@ export function CardStack({
         <GhostCard
           key={ghost.key}
           ghost={ghost}
-          config={config}
           flyDistance={flyDistance()}
           reduceMotion={reduceMotion}
           onDone={() => setGhosts((current) => current.filter((g) => g.key !== ghost.key))}
@@ -369,68 +358,47 @@ export function CardStack({
   );
 }
 
-function Stamp({
-  kind,
-  label,
-  opacity,
-}: {
-  kind: "keep" | "dispose" | "neutral";
-  label: string;
-  opacity: MotionValue<number> | number;
-}) {
-  return (
-    <motion.span className={`pare-stamp pare-stamp--${kind}`} style={{ opacity }} aria-hidden>
-      {label}
-    </motion.span>
-  );
-}
-
 function GhostCard({
   ghost,
-  config,
   flyDistance,
   reduceMotion,
   onDone,
 }: {
   ghost: Ghost;
-  config: SessionConfig;
   flyDistance: number;
   reduceMotion: boolean;
   onDone: () => void;
 }) {
-  const { kind, fromX, fromY } = ghost;
+  const { kind, fromX, fromY, fromOpacity } = ghost;
   // Flying cards fade over the last part of the flight, so they never reach
   // the iframe edge where the host would clip them.
   const target =
     kind === "keep"
-      ? { x: flyDistance, y: fromY + 24, rotate: 14, opacity: [1, 1, 0] }
+      ? { x: flyDistance, y: fromY + 20, rotate: 10, opacity: 0 }
       : kind === "dispose"
-        ? { x: -flyDistance, y: fromY + 24, rotate: -14, opacity: [1, 1, 0] }
+        ? { x: -flyDistance, y: fromY + 20, rotate: -10, opacity: 0 }
         : kind === "skip"
-          ? { x: fromX, y: 72, rotate: 0, scale: 0.96, opacity: 0 }
+          ? { x: fromX, y: 64, rotate: 0, scale: 0.96, opacity: 0 }
           : { x: fromX, y: fromY - 8, rotate: 0, scale: 0.94, opacity: 0 };
   const transition = reduceMotion
     ? { duration: 0 }
     : kind === "keep" || kind === "dispose"
-      ? {
-          duration: FLY_DURATION,
-          ease: EASE_OUT,
-          opacity: { duration: FLY_DURATION, times: [0, 0.35, 1] },
-        }
+      ? { duration: FLY_DURATION, ease: EASE_OUT, opacity: { duration: FLY_DURATION * 0.8 } }
       : { duration: 0.24, ease: EASE_OUT };
-  const stampKind = kind === "keep" || kind === "dispose" ? kind : "neutral";
 
   return (
     <motion.div
       className="pare-card pare-card--ghost"
-      initial={{ x: fromX, y: fromY, rotate: fromX / 28, opacity: 1, scale: 1 }}
+      initial={{ x: fromX, y: fromY, rotate: fromX / 32, opacity: fromOpacity, scale: 1 }}
       animate={target}
       transition={transition}
       onAnimationComplete={onDone}
       aria-hidden
     >
-      <Card item={ghost.item} config={config} expanded={false}>
-        <Stamp kind={stampKind} label={ghost.label} opacity={1} />
+      <Card item={ghost.item}>
+        {(kind === "keep" || kind === "dispose") && (
+          <span className={`pare-edge pare-edge--${kind}`} />
+        )}
       </Card>
     </motion.div>
   );

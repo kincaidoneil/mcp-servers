@@ -6,13 +6,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { applyDocumentTheme, type McpUiDisplayMode } from "@modelcontextprotocol/ext-apps";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
+import { useMotionValue, useTransform } from "motion/react";
 import { z } from "zod";
 import {
   DISPOSE,
   KEEP,
   StartInputSchema,
   StartResultSchema,
-  actionLabel,
   buildSession,
   type Item,
   type Session,
@@ -21,9 +21,9 @@ import { createHostBridge, type HostBridge } from "./host";
 import { contextUpdate, resultsMessage } from "./messages";
 import * as S from "./state";
 import { loadCached, mergeCached, saveCached } from "./storage";
-import { ActionBar, Legend } from "./components/ActionBar";
+import { ExtraActions, SideAction } from "./components/ActionBar";
 import { CardStack, type StackApi } from "./components/CardStack";
-import { Header, Menu } from "./components/Header";
+import { StatusBar, Menu } from "./components/Header";
 import { NoteField } from "./components/NoteField";
 import { Summary } from "./components/Summary";
 
@@ -142,7 +142,11 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const [noteOpen, setNoteOpen] = useState(false);
   const noteOpenRef = useRef(false);
   noteOpenRef.current = noteOpen;
-  const [expanded, setExpanded] = useState(false);
+  // How far the card is pulled toward a side, written by the stack and read
+  // by the side actions.
+  const pull = useMotionValue(0);
+  const keepPull = useTransform(pull, [0, 1], [0, 1]);
+  const disposePull = useTransform(pull, [-1, 0], [1, 0]);
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<"final" | "progress" | null>(
     initial.status === "done" ? "final" : null,
@@ -196,7 +200,6 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const resetCard = () => {
     setNote("");
     setNoteOpen(false);
-    setExpanded(false);
     focusRoot();
   };
   const openNote = (text: string) => {
@@ -217,7 +220,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       if (!item) return;
       if (!viaSwipe) {
         const kind = actionId === KEEP ? "keep" : actionId === DISPOSE ? "dispose" : "fade";
-        stackApi.current?.exit(item.id, kind, actionLabel(current.session.config, actionId));
+        stackApi.current?.exit(item.id, kind);
       }
       commit((s) => S.decide(s, item.id, actionId, noteRef.current, now()));
       setSent((prev) => (prev === "final" ? null : prev));
@@ -230,7 +233,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     const current = stateRef.current;
     const item = itemById(current, current.session.queue[0]);
     if (!item || current.session.queue.length < 2) return;
-    stackApi.current?.exit(item.id, "skip", "Later");
+    stackApi.current?.exit(item.id, "skip");
     commit((s) => S.skip(s, item.id, now()));
     resetCard();
   }, [commit]);
@@ -315,13 +318,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       if (e.key === "ArrowLeft") return handle(() => act(DISPOSE));
       if (e.key === "Enter") return handle(() => act(confirmAction));
       if (e.key === "ArrowDown" && config.skip) return handle(skipTop);
-      if (e.key === "ArrowUp") {
-        return handle(() => {
-          if (expanded || stackApi.current?.canExpand()) setExpanded((v) => !v);
-        });
-      }
       if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey) return handle(undo);
-      if (e.key === "Escape") return handle(() => setExpanded(false));
       if (mod || e.altKey || e.key.length !== 1) return;
       if (/^[1-4]$/.test(e.key)) {
         const extra = config.extra_actions[Number(e.key) - 1];
@@ -337,7 +334,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [act, skipTop, undo, expanded]);
+  }, [act, skipTop, undo]);
 
   // Focus the deck once it is on screen.
   useEffect(() => {
@@ -356,7 +353,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const { decided, total } = S.progress(session);
   const fullscreen = displayMode === "fullscreen";
   const remaining = session.queue.length;
-  const enterLabel = actionLabel(config, top?.suggestion?.action ?? KEEP);
+  const enterAction = top?.suggestion?.action ?? KEEP;
 
   const menu = (
     <Menu
@@ -390,61 +387,60 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       style={safeBottom ? { paddingBottom: safeBottom + 12 } : undefined}
       data-testid="pare"
     >
-      <Header
-        title={config.title}
-        description={config.description}
-        decided={decided}
-        total={total}
-        canUndo={S.canUndo(state)}
-        onUndo={undo}
-        fullscreen={fullscreen}
-        canFullscreen={host.availableDisplayModes().includes("fullscreen")}
-        onToggleFullscreen={() => void toggleFullscreen()}
-        menu={menu}
-      />
-
       {top ? (
         <>
-          <CardStack
-            items={queueItems}
-            config={config}
-            expanded={expanded}
-            onToggleExpanded={() => {
-              setExpanded((v) => !v);
-              focusRoot();
-            }}
-            onSwipe={(itemId, action) => {
-              if (itemId === stateRef.current.session.queue[0]) act(action, true);
-            }}
-            onOpenLink={(url) => void host.openLink(url)}
-            apiRef={stackApi}
-          />
-          {config.notes &&
-            (noteOpen ? (
-              <NoteField
-                value={note}
-                onChange={setNote}
-                enterLabel={enterLabel}
-                inputRef={noteInput}
+          <div className="pare-table">
+            <SideAction
+              kind="dispose"
+              config={config}
+              isEnter={enterAction === DISPOSE}
+              pull={disposePull}
+              onAction={(id) => act(id)}
+            />
+            <div className="pare-slide-col">
+              <CardStack
+                items={queueItems}
+                pull={pull}
+                onSwipe={(itemId, action) => {
+                  if (itemId === stateRef.current.session.queue[0]) act(action, true);
+                }}
+                onOpenLink={(url) => void host.openLink(url)}
+                apiRef={stackApi}
               />
-            ) : (
-              <button
-                type="button"
-                className="pare-note-open"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => openNote("")}
-                data-testid="note-open"
-              >
-                Type to add a note
-              </button>
-            ))}
-          <ActionBar
-            config={config}
-            canSkip={remaining > 1}
-            onAction={(id) => act(id)}
-            onSkip={skipTop}
-          />
-          <Legend notes={config.notes} />
+              {config.notes && noteOpen && (
+                <NoteField value={note} onChange={setNote} inputRef={noteInput} />
+              )}
+            </div>
+            <SideAction
+              kind="keep"
+              config={config}
+              isEnter={enterAction === KEEP}
+              pull={keepPull}
+              onAction={(id) => act(id)}
+            />
+          </div>
+          <div className="pare-under">
+            <ExtraActions
+              config={config}
+              canSkip={remaining > 1}
+              enterAction={enterAction}
+              onAction={(id) => act(id)}
+              onSkip={skipTop}
+              noteTrigger={
+                config.notes && !noteOpen ? (
+                  <button
+                    type="button"
+                    className="pare-extra pare-note-open"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => openNote("")}
+                    data-testid="note-open"
+                  >
+                    Note
+                  </button>
+                ) : undefined
+              }
+            />
+          </div>
         </>
       ) : (
         <Summary
@@ -457,6 +453,16 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
           onSend={() => void send(true)}
         />
       )}
+      <StatusBar
+        decided={decided}
+        total={total}
+        canUndo={S.canUndo(state)}
+        onUndo={undo}
+        fullscreen={fullscreen}
+        canFullscreen={host.availableDisplayModes().includes("fullscreen")}
+        onToggleFullscreen={() => void toggleFullscreen()}
+        menu={menu}
+      />
     </div>
   );
 }

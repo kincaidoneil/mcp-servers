@@ -47,13 +47,18 @@ export const ItemSchema = z.object({
   id: z.string().min(1).max(200).describe("Stable id the caller can map back, e.g. a message id."),
   title: z.string().min(1).max(200),
   subtitle: z.string().max(200).optional().describe("Second line, e.g. sender or project."),
-  body: z.string().max(6000).optional().describe("Plain text. Paragraphs split on blank lines."),
+  body: z
+    .string()
+    .max(600)
+    .optional()
+    .describe(
+      "One to three short sentences. The card shows four lines at most; there is no expand.",
+    ),
   meta: z
     .array(ItemMetaSchema)
-    .max(8)
+    .max(3)
     .optional()
-    .describe("Label/value pairs, e.g. Last opened: 14 months ago."),
-  tags: z.array(z.string().min(1).max(32)).max(8).optional(),
+    .describe("Up to three label/value facts, shown on one line, e.g. Last opened / 7 months ago."),
   url: z.url().optional().describe("Opens in the host browser from the card."),
   suggestion: z
     .object({

@@ -13,14 +13,6 @@ const base = {
   "aria-hidden": true,
 };
 
-export function ChevronIcon({ up = false }: { up?: boolean }) {
-  return (
-    <svg {...base} width={12} height={12}>
-      {up ? <path d="M3 10l5-5 5 5" /> : <path d="M3 6l5 5 5-5" />}
-    </svg>
-  );
-}
-
 export function ExpandIcon({ active = false }: { active?: boolean }) {
   return active ? (
     <svg {...base}>

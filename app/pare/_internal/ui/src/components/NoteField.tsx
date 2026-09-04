@@ -3,15 +3,12 @@ import { useLayoutEffect, type RefObject } from "react";
 interface NoteFieldProps {
   value: string;
   onChange: (value: string) => void;
-  // What Enter will do, shown at the right edge of the field.
-  enterLabel: string;
   inputRef: RefObject<HTMLTextAreaElement | null>;
 }
 
-export function NoteField({ value, onChange, enterLabel, inputRef }: NoteFieldProps) {
-  // Grow with the text. Re-measure on width changes too: the host sizes the
-  // iframe after first paint, and a measurement taken at the wrong width
-  // wraps the placeholder into several lines.
+// A single line under the slide that grows with the text. It appears on the
+// first typed letter and closes with the card.
+export function NoteField({ value, onChange, inputRef }: NoteFieldProps) {
   useLayoutEffect(() => {
     const el = inputRef.current;
     if (!el) return;
@@ -31,15 +28,12 @@ export function NoteField({ value, onChange, enterLabel, inputRef }: NoteFieldPr
         ref={inputRef}
         rows={1}
         value={value}
-        placeholder="Add a note, or just decide…"
+        placeholder="Note"
         aria-label="Note for this item"
         spellCheck
         onChange={(e) => onChange(e.target.value)}
         data-testid="note"
       />
-      <span className="pare-note__hint" aria-hidden>
-        <kbd className="pare-kbd">↵</kbd> {enterLabel}
-      </span>
     </div>
   );
 }
