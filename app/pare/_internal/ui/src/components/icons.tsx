@@ -43,3 +43,20 @@ export function UndoIcon() {
     </svg>
   );
 }
+
+// The model's suggestion. Blue, and used for nothing else.
+export function SparkleIcon() {
+  return (
+    <svg
+      width={13}
+      height={13}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      aria-hidden
+      focusable="false"
+    >
+      <path d="M8 1.2l1.35 3.95a2 2 0 0 0 1.25 1.25L14.8 7.8l-4.2 1.4a2 2 0 0 0-1.25 1.25L8 14.4l-1.35-3.95a2 2 0 0 0-1.25-1.25L1.2 7.8l4.2-1.4a2 2 0 0 0 1.25-1.25z" />
+      <path d="M13.1 1.1l.5 1.4 1.4.5-1.4.5-.5 1.4-.5-1.4-1.4-.5 1.4-.5z" opacity="0.7" />
+    </svg>
+  );
+}

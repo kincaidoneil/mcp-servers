@@ -26,9 +26,8 @@
   --keep-ink: #2b7a4b;
   --dispose: #f0877a; /* 7.5:1 on the table */
   --dispose-ink: #b43d2e;
-  /* Amber means "suggested" and nothing else. */
-  --amber: #e5b356;
-  --amber-ink: #b8862e;
+  /* Blue marks what the model suggests, and nothing else. */
+  --hint: #8fb6f2; /* 8.3:1 on the table */
 
   --card-h: 272px;
 
@@ -195,17 +194,9 @@ a {
 }
 
 .pare-side__arrow {
-  position: relative;
   font-size: 22px;
   line-height: 1;
   margin-bottom: 4px;
-}
-
-.pare-side__arrow .pare-suggested {
-  position: absolute;
-  top: -2px;
-  right: -12px;
-  margin: 0;
 }
 
 .pare-side--dispose .pare-side__btn {
@@ -217,13 +208,14 @@ a {
 }
 
 .pare-suggested {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--amber);
-  margin-left: 7px;
-  vertical-align: 1px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--hint);
+  margin-top: 6px;
+}
+
+.pare-extra .pare-suggested {
+  margin: 0 0 0 2px;
 }
 
 /* Hover tooltips name the key for every control. */
@@ -231,13 +223,12 @@ a {
   position: relative;
 }
 
-[data-tip]:hover::after,
-[data-tip]:focus-visible::after {
+[data-tip]::after {
   content: attr(data-tip);
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 6px);
-  translate: -50% 0;
+  bottom: calc(100% + 4px);
+  translate: -50% 3px;
   white-space: nowrap;
   font-size: 11px;
   font-weight: 400;
@@ -247,13 +238,28 @@ a {
   background: #000;
   color: var(--light);
   pointer-events: none;
+  opacity: 0;
   z-index: 40;
+  transition:
+    opacity 120ms ease,
+    translate 120ms ease;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  translate: -50% 0;
+  transition-delay: 320ms;
+}
+
+.pare-foot [data-tip]::after {
+  left: auto;
+  right: 0;
+  translate: 0 3px;
 }
 
 .pare-foot [data-tip]:hover::after,
 .pare-foot [data-tip]:focus-visible::after {
-  left: auto;
-  right: 0;
   translate: 0 0;
 }
 
@@ -342,7 +348,7 @@ a {
 }
 
 .pare-card__source {
-  margin: 4px 0 0;
+  margin: 5px 0 0;
   font-size: 13px;
   line-height: 1.45;
   color: var(--ink-3);
@@ -375,17 +381,17 @@ a {
 
 .pare-facts dd {
   margin: 0;
-  color: var(--ink-2);
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .pare-card__body {
-  margin-top: 12px;
+  margin-top: 14px;
   font-size: 15px;
   line-height: 1.5;
-  color: var(--ink-2);
+  color: var(--ink);
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
@@ -398,58 +404,6 @@ a {
 
 .pare-card__body p:last-child {
   margin-bottom: 0;
-}
-
-/* The suggestion and the drag both speak through the card's edges: a short
- * rule marks the suggested side; dragging grows a rule on the side the card
- * is moving toward. */
-.pare-edge {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  pointer-events: none;
-}
-
-.pare-edge--dispose {
-  left: 0;
-  background: var(--dispose-ink);
-}
-
-.pare-edge--keep {
-  right: 0;
-  background: var(--keep-ink);
-}
-
-.pare-mark {
-  position: absolute;
-  top: 50%;
-  translate: 0 -50%;
-  width: 4px;
-  height: 36px;
-}
-
-.pare-mark--dispose {
-  left: 0;
-  border-radius: 0 2px 2px 0;
-  background: var(--amber-ink);
-}
-
-.pare-mark--keep {
-  right: 0;
-  border-radius: 2px 0 0 2px;
-  background: var(--amber-ink);
-}
-
-.pare-mark--extra {
-  top: auto;
-  translate: -50% 0;
-  bottom: 0;
-  left: 50%;
-  width: 36px;
-  height: 4px;
-  border-radius: 2px 2px 0 0;
-  background: var(--amber-ink);
 }
 
 /* ---- Under the slide ----------------------------------------------------- */
@@ -504,22 +458,28 @@ a {
 /* ---- Note ---------------------------------------------------------------- */
 
 .pare-note {
-  margin-top: 2px;
+  margin-top: 16px;
 }
 
 .pare-note textarea {
   display: block;
   width: 100%;
   resize: none;
-  min-height: 34px;
-  max-height: 120px;
-  padding: 6px 2px;
+  min-height: 46px;
+  max-height: 140px;
+  padding: 2px 2px 4px;
   border: 0;
   border-bottom: 1px solid var(--hair);
   background: transparent;
   color: var(--light);
-  font-size: 14px;
-  line-height: 1.45;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.pare-note__caption {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--light-3);
 }
 
 .pare-note textarea::placeholder {
@@ -549,6 +509,8 @@ a {
 }
 
 .pare-count {
+  height: 28px;
+  line-height: 28px;
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   margin-right: 8px;
@@ -583,8 +545,9 @@ a {
 }
 
 .pare-icon-btn svg {
-  width: 15px;
-  height: 15px;
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 
 /* ---- Menu ---------------------------------------------------------------- */

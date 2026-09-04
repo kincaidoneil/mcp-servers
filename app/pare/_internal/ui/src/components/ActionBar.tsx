@@ -1,11 +1,12 @@
 // The actions around the slide. The two outcomes sit at the left and right of
-// the card in their colors and brighten as the card is dragged their way.
-// Later and the extra actions sit under the card as dim text with digits.
-// The suggested action carries an amber dot; amber means "suggested" and
-// nothing else. Every control names its key in a hover tooltip.
+// the card in their colors; Later and the extra actions sit under it as dim
+// text with digits. The model's suggestion is a blue sparkle next to the
+// action it points at, and blue means that and nothing else. Tooltips name
+// the key and nothing else, so they read the same in every session.
 
 import { motion, useTransform, type MotionValue } from "motion/react";
 import { DISPOSE, KEEP, type SessionConfig } from "../../../schema";
+import { SparkleIcon } from "./icons";
 
 const stop = (e: React.MouseEvent) => e.preventDefault();
 
@@ -21,7 +22,7 @@ interface SideActionProps {
 export function SideAction({ kind, config, suggested, pull, onAction }: SideActionProps) {
   const action = kind === "keep" ? config.keep : config.dispose;
   const id = kind === "keep" ? KEEP : DISPOSE;
-  const opacity = useTransform(pull, [0, 1], [0.8, 1]);
+  const opacity = useTransform(pull, [0, 1], [0.82, 1]);
   const keys = kind === "keep" ? "→ or Enter" : "←";
   return (
     <div className={`pare-side pare-side--${kind}`}>
@@ -29,7 +30,7 @@ export function SideAction({ kind, config, suggested, pull, onAction }: SideActi
         type="button"
         className="pare-side__btn"
         style={{ opacity }}
-        data-tip={action.hint ? `${keys} · ${action.hint}` : keys}
+        data-tip={keys}
         aria-label={`${action.label}, ${keys}`}
         onMouseDown={stop}
         onClick={() => onAction(id)}
@@ -37,9 +38,9 @@ export function SideAction({ kind, config, suggested, pull, onAction }: SideActi
       >
         <span className="pare-side__arrow" aria-hidden>
           {kind === "keep" ? "→" : "←"}
-          {suggested && <SuggestedDot />}
         </span>
         <span className="pare-side__label">{action.label}</span>
+        {suggested && <Suggested />}
       </motion.button>
     </div>
   );
@@ -62,7 +63,7 @@ export function ExtraActions(props: ExtraActionsProps) {
         <button
           type="button"
           className="pare-extra"
-          data-tip="↓ · move to the bottom of the deck"
+          data-tip="↓"
           aria-label="Later, down arrow"
           disabled={!props.canSkip}
           onMouseDown={stop}
@@ -80,7 +81,7 @@ export function ExtraActions(props: ExtraActionsProps) {
           key={action.id}
           type="button"
           className="pare-extra"
-          data-tip={action.hint ? `${i + 1} · ${action.hint}` : `${i + 1}`}
+          data-tip={`${i + 1}`}
           aria-label={`${action.label}, ${i + 1}`}
           onMouseDown={stop}
           onClick={() => props.onAction(action.id)}
@@ -90,13 +91,17 @@ export function ExtraActions(props: ExtraActionsProps) {
             {i + 1}
           </span>
           {action.label}
-          {props.suggestedAction === action.id && <SuggestedDot />}
+          {props.suggestedAction === action.id && <Suggested />}
         </button>
       ))}
     </div>
   );
 }
 
-function SuggestedDot() {
-  return <span className="pare-suggested" title="Suggested" aria-label="suggested" />;
+function Suggested() {
+  return (
+    <span className="pare-suggested" aria-label="suggested" data-testid="suggested">
+      <SparkleIcon />
+    </span>
+  );
 }

@@ -42,8 +42,10 @@ test("keyboard: decide, note, suggestion, undo, skip, and the model's context fo
   await expect(app.getByTestId("note")).toHaveValue("");
   await expect(app.getByTestId("note")).toBeFocused();
 
-  // Enter always keeps, whatever the card suggests (nl-3 suggests dispose).
-  await expect(app.getByTestId("suggestion-mark")).toHaveClass(/pare-mark--dispose/);
+  // Enter always keeps, whatever the card suggests. nl-3 suggests dispose, so
+  // the sparkle sits on the dispose action.
+  await expect(app.getByTestId("action-dispose").getByTestId("suggested")).toBeVisible();
+  await expect(app.getByTestId("action-keep").getByTestId("suggested")).toHaveCount(0);
   await page.keyboard.press("Enter");
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-4");
   await expect(inContext(page, "nl-3")).toHaveAttribute("data-action", "keep");
@@ -130,8 +132,8 @@ test("extra actions by key, by button, and through a suggestion", async ({ page 
   await expect(top(app)).toHaveAttribute("data-item-id", "t-3");
   await expect(inContext(page, "t-2")).toHaveAttribute("data-action", "delegate");
 
-  // t-3 suggests "later": the suggestion is a mark, not a key. Enter keeps.
-  await expect(app.getByTestId("suggestion-mark")).toHaveClass(/pare-mark--extra/);
+  // t-3 suggests "later": the sparkle marks that action, and Enter still keeps.
+  await expect(app.getByTestId("action-later").getByTestId("suggested")).toBeVisible();
   await page.keyboard.press("Enter");
   await expect(top(app)).toHaveAttribute("data-item-id", "t-4");
   await expect(inContext(page, "t-3")).toHaveAttribute("data-action", "keep");

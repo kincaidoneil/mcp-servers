@@ -189,18 +189,18 @@ export const FIXTURES: Record<string, SessionConfigInput> = {
   newsletters: {
     title: "Newsletter subscriptions",
     description: "Unsubscribe from the ones you no longer read.",
-    keep: { label: "Stay subscribed", hint: "Leave this subscription alone" },
-    dispose: { label: "Unsubscribe", hint: "Unsubscribe and archive past issues" },
+    keep: { label: "Stay subscribed" },
+    dispose: { label: "Unsubscribe" },
     items: newsletterItems,
   },
   tasks: {
     title: "Backlog review",
     description: "Every task older than a week. Keep, drop, or park it.",
     keep: { label: "Keep" },
-    dispose: { label: "Drop", hint: "Delete the task" },
+    dispose: { label: "Drop" },
     extra_actions: [
-      { id: "later", label: "Someday", hint: "Move to the someday list" },
-      { id: "delegate", label: "Delegate", hint: "Hand it to someone else" },
+      { id: "later", label: "Someday" },
+      { id: "delegate", label: "Delegate" },
     ],
     items: taskItems,
   },

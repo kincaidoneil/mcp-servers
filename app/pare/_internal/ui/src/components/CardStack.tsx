@@ -1,19 +1,17 @@
 // The deck. Owns every bit of motion: pointer drag, two-finger trackpad
 // swipes, keyboard-triggered exits, and the card that slides back in after
-// an undo. It also reports how far the card has been pulled toward either
-// side, so the side actions and the card's edge can answer.
+// an undo. It reports how far the card has been pulled toward either side in
+// `pull`, which drives the table's glow and the side labels.
 //
-// Decisions are committed the moment a gesture crosses the threshold. The
-// leaving card becomes a detached "ghost" that finishes its flight while the
-// next card is already live, so a fast run of keypresses never waits on an
-// animation.
+// Decisions are committed the moment a gesture is done. The leaving card
+// becomes a detached "ghost" that finishes its flight while the next card is
+// already live, so a fast run of keypresses never waits on an animation.
 
 import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   animate,
   motion,
   useMotionValue,
-  useMotionValueEvent,
   useReducedMotion,
   useTransform,
   type MotionValue,
@@ -47,7 +45,6 @@ interface Ghost {
 }
 
 const VISIBLE_BEHIND = 2;
-const PULL_DISTANCE = 110;
 const FLY_DURATION = 0.34;
 const EASE_OUT = [0.2, 0, 0, 1] as const;
 const SPRING = { type: "spring", stiffness: 520, damping: 42, mass: 0.9 } as const;
@@ -59,12 +56,6 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const opacity = useMotionValue(1);
-  // The card thins a little as it is pushed and never reaches the iframe
-  // edge opaque.
-  const dragFade = useTransform(x, [-260, -60, 0, 60, 260], [0.2, 1, 1, 1, 0.2]);
-  // The pull only reads while the user is moving the card, not when a card
-  // slides back in after an undo.
-  const gate = useMotionValue(0);
   const [ghosts, setGhosts] = useState<Ghost[]>([]);
   const [dragging, setDragging] = useState(false);
   const ghostSeq = useRef(0);
@@ -78,6 +69,24 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   const latest = useRef({ items, onSwipe });
   latest.current = { items, onSwipe };
+
+  const rotate = useTransform(x, [-320, 320], [-9, 9]);
+  // The card thins a little as it is pushed and never reaches the iframe
+  // edge opaque.
+  const dragFade = useTransform(x, [-260, -60, 0, 60, 260], [0.2, 1, 1, 1, 0.2]);
+  const topOpacity = useTransform(() => dragFade.get() * opacity.get());
+
+  // The glow follows the card's travel, easing in late so a small nudge shows
+  // almost nothing and the light arrives as the card nears the line.
+  function applyPull(travel: number) {
+    const ratio = Math.max(-1, Math.min(1, travel / commitDistance()));
+    pull.set(Math.sign(ratio) * Math.abs(ratio) ** 2.2);
+  }
+
+  function releasePull() {
+    if (reduceMotion) pull.set(0);
+    else animate(pull, 0, { duration: 0.3, ease: EASE_OUT });
+  }
 
   function launchGhost(itemId: string, kind: ExitKind) {
     const item = latest.current.items.find((i) => i.id === itemId);
@@ -96,10 +105,10 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
       },
     ]);
     if (isTop) {
-      gate.set(0);
       x.jump(0);
       y.jump(0);
     }
+    releasePull();
   }
 
   apiRef.current = { exit: launchGhost };
@@ -113,7 +122,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
   }
 
   function settleBack() {
-    gate.set(0);
+    releasePull();
     if (reduceMotion) {
       x.jump(0);
       y.jump(0);
@@ -144,16 +153,29 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topId]);
 
-  // Two-finger trackpad swipes arrive as wheel events with no end event; a
-  // short gap in the stream stands in for the fingers lifting. A cooldown
-  // after a commit swallows the momentum that follows. Vertical scrolling
-  // passes through.
+  // Two-finger trackpad swipes arrive as wheel events with no end event, and
+  // momentum keeps firing after the fingers lift. Past the line the swipe
+  // commits as soon as that momentum starts dying, which lands close to the
+  // moment of release; pulling back before then cancels.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     let axis: "x" | "y" | null = null;
     let idle: ReturnType<typeof setTimeout> | undefined;
     let cooldownUntil = 0;
+    let peak = 0;
+
+    const finish = () => {
+      axis = null;
+      peak = 0;
+      const settled = x.get();
+      if (Math.abs(settled) >= commitDistance()) {
+        commitSwipe(settled > 0 ? 1 : -1);
+        cooldownUntil = performance.now() + 400;
+      } else {
+        settleBack();
+      }
+    };
 
     const onWheel = (event: WheelEvent) => {
       if (!latest.current.items[0]) return;
@@ -175,24 +197,21 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
         return;
       }
       event.preventDefault();
-      gate.set(1);
       // Natural scrolling: fingers moving right report a negative deltaX.
-      // Travel is clamped so momentum cannot overshoot, and the swipe commits
-      // only once the wheel stream stops: lifting the fingers decides, and
-      // pulling back before that cancels.
+      // Travel is clamped so momentum cannot overshoot the line.
       const limit = commitDistance() + 40;
       const next = Math.max(-limit, Math.min(limit, x.get() - dx));
       x.set(next);
-      idle = setTimeout(() => {
-        axis = null;
-        const settled = x.get();
-        if (Math.abs(settled) >= commitDistance()) {
-          commitSwipe(settled > 0 ? 1 : -1);
-          cooldownUntil = performance.now() + 400;
-        } else {
-          settleBack();
-        }
-      }, 90);
+      applyPull(next);
+      const speed = Math.abs(dx);
+      peak = Math.max(peak, speed);
+      if (Math.abs(next) >= commitDistance() && speed <= Math.max(2, peak * 0.35)) {
+        finish();
+        return;
+      }
+      // A longer gap than this is a pause, not the space between two frames
+      // of one gesture; momentum decay above is what usually ends a swipe.
+      idle = setTimeout(finish, 120);
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -241,7 +260,6 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
         d.active = true;
         event.currentTarget.setPointerCapture(event.pointerId);
         setDragging(true);
-        gate.set(1);
       } else if (Math.abs(dy) > 10) {
         drag.current = null;
         return;
@@ -257,6 +275,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     d.lastT = now;
     x.set(dx);
     y.set(dy * 0.22);
+    applyPull(dx);
   }
 
   function endDrag(event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) {
@@ -281,21 +300,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     }
   }
 
-  const rotate = useTransform(x, [-320, 320], [-9, 9]);
-  // The card thins as it is pushed, so the outcome it is heading for shows
-  // through it, and a long drag never reaches the iframe edge opaque.
-  const topOpacity = useTransform(() => dragFade.get() * opacity.get());
-  const signedPull = useTransform(
-    () => Math.max(-1, Math.min(1, x.get() / PULL_DISTANCE)) * gate.get(),
-  );
-  useMotionValueEvent(signedPull, "change", (value) => pull.set(value));
-  const keepEdge = useTransform(signedPull, [0, 1], [0, 1]);
-  const disposeEdge = useTransform(signedPull, [-1, 0], [1, 0]);
-
   const behind = items.slice(1, 1 + VISIBLE_BEHIND);
-  const suggestion = top?.suggestion;
-  const suggestedKind =
-    suggestion?.action === KEEP ? "keep" : suggestion?.action === DISPOSE ? "dispose" : "extra";
 
   return (
     <div ref={stageRef} className="pare-stage">
@@ -334,20 +339,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
           data-testid="top-card"
           data-item-id={top.id}
         >
-          <Card item={top} onOpenLink={onOpenLink}>
-            {suggestion && (
-              <span
-                className={`pare-mark pare-mark--${suggestedKind}`}
-                title={suggestion.reason ? `Suggested. ${suggestion.reason}` : "Suggested"}
-                data-testid="suggestion-mark"
-              />
-            )}
-            <motion.span
-              className="pare-edge pare-edge--dispose"
-              style={{ opacity: disposeEdge }}
-            />
-            <motion.span className="pare-edge pare-edge--keep" style={{ opacity: keepEdge }} />
-          </Card>
+          <Card item={top} onOpenLink={onOpenLink} />
         </motion.div>
       )}
 
@@ -376,8 +368,6 @@ function GhostCard({
   onDone: () => void;
 }) {
   const { kind, fromX, fromY, fromOpacity } = ghost;
-  // Flying cards fade over the last part of the flight, so they never reach
-  // the iframe edge where the host would clip them.
   const target =
     kind === "keep"
       ? { x: flyDistance, y: fromY + 20, rotate: 10, opacity: 0 }
@@ -401,11 +391,7 @@ function GhostCard({
       onAnimationComplete={onDone}
       aria-hidden
     >
-      <Card item={ghost.item}>
-        {(kind === "keep" || kind === "dispose") && (
-          <span className={`pare-edge pare-edge--${kind}`} />
-        )}
-      </Card>
+      <Card item={ghost.item} />
     </motion.div>
   );
 }

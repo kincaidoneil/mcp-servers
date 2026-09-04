@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { applyDocumentTheme, type McpUiDisplayMode } from "@modelcontextprotocol/ext-apps";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
-import { motion, useMotionValue, useTransform } from "motion/react";
+import { animate, motion, useMotionValue, useTransform } from "motion/react";
 import { z } from "zod";
 import {
   DISPOSE,
@@ -192,6 +192,18 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     focusRoot();
   };
 
+  // A decision made from the keyboard or a button lights the same side of the
+  // table that a drag would.
+  const flashGlow = useCallback(
+    (actionId: string) => {
+      const direction = actionId === KEEP ? 1 : actionId === DISPOSE ? -1 : 0;
+      if (direction === 0) return;
+      pull.set(direction * 0.9);
+      animate(pull, 0, { duration: 0.5, ease: [0.2, 0, 0, 1] });
+    },
+    [pull],
+  );
+
   const act = useCallback(
     (actionId: string, viaSwipe = false) => {
       const current = stateRef.current;
@@ -200,12 +212,13 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       if (!viaSwipe) {
         const kind = actionId === KEEP ? "keep" : actionId === DISPOSE ? "dispose" : "fade";
         stackApi.current?.exit(item.id, kind);
+        flashGlow(actionId);
       }
       commit((s) => S.decide(s, item.id, actionId, noteRef.current, now()));
       setSent((prev) => (prev === "final" ? null : prev));
       resetCard();
     },
-    [commit],
+    [commit, flashGlow],
   );
 
   const skipTop = useCallback(() => {

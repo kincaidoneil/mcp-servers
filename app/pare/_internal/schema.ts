@@ -20,11 +20,6 @@ const RESERVED_ACTION_IDS = new Set([KEEP, DISPOSE, SKIP]);
 
 export const ActionLabelSchema = z.object({
   label: z.string().min(1).max(24).describe("Button label, e.g. 'Unsubscribe'."),
-  hint: z
-    .string()
-    .max(120)
-    .optional()
-    .describe("One line under the label explaining the consequence."),
 });
 export type ActionLabel = z.infer<typeof ActionLabelSchema>;
 
@@ -34,7 +29,6 @@ export const ExtraActionSchema = z.object({
     .regex(/^[a-z][a-z0-9_-]{0,31}$/, "lowercase id, e.g. 'snooze'")
     .refine((id) => !RESERVED_ACTION_IDS.has(id), "keep, dispose, and skip are reserved"),
   label: z.string().min(1).max(24),
-  hint: z.string().max(120).optional(),
 });
 export type ExtraAction = z.infer<typeof ExtraActionSchema>;
 
