@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { createMcpHandler } from "mcp-handler";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAppResource, RESOURCE_MIME_TYPE } from "@modelcontextprotocol/ext-apps/server";
-import { protectMcpHandler } from "@/lib/oauth-as";
 import { getConfig } from "./config";
 import { APP_RESOURCE_URI, registerTools } from "./tools";
 
@@ -56,9 +55,10 @@ export function registerPare(server: McpServer) {
   registerResource(server);
 }
 
-// Compose the Streamable HTTP MCP handler at /pare, gated by withMcpAuth.
+// The Streamable HTTP MCP handler at /pare. Public: pare holds no state and
+// needs no identity.
 export function createPareMcpHandler() {
-  const rawHandler = createMcpHandler(
+  return createMcpHandler(
     (server) => {
       registerPare(server);
     },
@@ -69,5 +69,4 @@ export function createPareMcpHandler() {
       verboseLogs: false,
     },
   );
-  return protectMcpHandler(rawHandler, "/pare", () => getConfig().oauth);
 }

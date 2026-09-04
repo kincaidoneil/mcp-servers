@@ -206,8 +206,8 @@ export const FIXTURES: Record<string, SessionConfigInput> = {
     keep: { label: "Keep" },
     dispose: { label: "Drop", hint: "Delete the task" },
     extra_actions: [
-      { id: "later", label: "Someday", key: "s", hint: "Move to the someday list" },
-      { id: "delegate", label: "Delegate", key: "d", hint: "Hand it to someone else" },
+      { id: "later", label: "Someday", hint: "Move to the someday list" },
+      { id: "delegate", label: "Delegate", hint: "Hand it to someone else" },
     ],
     items: taskItems,
   },

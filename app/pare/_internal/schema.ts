@@ -1,7 +1,12 @@
-// The contract shared by the pare MCP tools (server) and the pare app (UI).
+// The contract shared by the pare MCP tool (server) and the pare app (UI).
 // Both sides parse with these schemas: the server validates tool input, the
-// app validates what comes back from the host. Tool-facing field names are
-// snake_case to match the other bridges.
+// app validates the tool input the host replays to it. Tool-facing field
+// names are snake_case to match the other bridges.
+//
+// Pare holds no server state. A session lives in the app's browser storage
+// and in the context updates the app sends the model after every decision;
+// the model can reopen a session by calling pare-start again with the same
+// session_id and the decisions it has seen.
 
 import { z } from "zod";
 
@@ -30,12 +35,6 @@ export const ExtraActionSchema = z.object({
     .refine((id) => !RESERVED_ACTION_IDS.has(id), "keep, dispose, and skip are reserved"),
   label: z.string().min(1).max(24),
   hint: z.string().max(120).optional(),
-  key: z
-    .string()
-    .length(1)
-    .regex(/^[a-z0-9]$/)
-    .optional()
-    .describe("Single-character keyboard shortcut, active while the note field is empty."),
 });
 export type ExtraAction = z.infer<typeof ExtraActionSchema>;
 
@@ -66,173 +65,148 @@ export const ItemSchema = z.object({
 });
 export type Item = z.infer<typeof ItemSchema>;
 
-export const SessionConfigSchema = z
-  .object({
-    title: z
-      .string()
-      .min(1)
-      .max(120)
-      .describe("What is being triaged, e.g. 'Newsletter subscriptions'."),
-    description: z.string().max(300).optional().describe("One sentence framing the decision."),
-    keep: ActionLabelSchema.default({ label: "Keep" }).describe("The right-swipe action."),
-    dispose: ActionLabelSchema.default({ label: "Dispose" }).describe("The left-swipe action."),
-    extra_actions: z
-      .array(ExtraActionSchema)
-      .max(4)
-      .default([])
-      .describe("Secondary buckets beyond keep/dispose, e.g. Snooze or Delegate."),
-    notes: z
-      .boolean()
-      .default(true)
-      .describe("Show the note field so the user can add commentary."),
-    skip: z.boolean().default(true).describe("Allow deferring an item to the end of the stack."),
-    items: z.array(ItemSchema).min(1).max(500),
-  })
-  .superRefine((config, ctx) => {
-    const ids = new Set<string>();
-    for (const [i, item] of config.items.entries()) {
-      if (ids.has(item.id)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["items", i, "id"],
-          message: `duplicate item id ${item.id}`,
-        });
-      }
-      ids.add(item.id);
-    }
-    const actionIds = new Set<string>([KEEP, DISPOSE]);
-    for (const [i, action] of config.extra_actions.entries()) {
-      if (actionIds.has(action.id)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["extra_actions", i, "id"],
-          message: `duplicate action id ${action.id}`,
-        });
-      }
-      actionIds.add(action.id);
-    }
-    for (const [i, item] of config.items.entries()) {
-      if (item.suggestion && !actionIds.has(item.suggestion.action)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["items", i, "suggestion", "action"],
-          message: `unknown action ${item.suggestion.action}`,
-        });
-      }
-    }
-  });
-export type SessionConfig = z.infer<typeof SessionConfigSchema>;
-export type SessionConfigInput = z.input<typeof SessionConfigSchema>;
-
 export const DecisionSchema = z.object({
   item_id: z.string().min(1),
   action: z.string().min(1).describe("keep, dispose, or an extra action id."),
   note: z.string().max(2000).optional(),
-  decided_at: z.iso.datetime(),
+  decided_at: z.iso.datetime().optional().describe("Set by the app; omit when restoring."),
 });
 export type Decision = z.infer<typeof DecisionSchema>;
+
+const SessionConfigBaseSchema = z.object({
+  title: z
+    .string()
+    .min(1)
+    .max(120)
+    .describe("What is being triaged, e.g. 'Newsletter subscriptions'."),
+  description: z.string().max(300).optional().describe("One sentence framing the decision."),
+  keep: ActionLabelSchema.default({ label: "Keep" }).describe("The right-swipe action."),
+  dispose: ActionLabelSchema.default({ label: "Dispose" }).describe("The left-swipe action."),
+  extra_actions: z
+    .array(ExtraActionSchema)
+    .max(4)
+    .default([])
+    .describe(
+      "Secondary buckets beyond keep/dispose, e.g. Snooze or Delegate. Keys 1 to 4 in the app.",
+    ),
+  notes: z.boolean().default(true).describe("Show the note field so the user can add commentary."),
+  skip: z.boolean().default(true).describe("Allow deferring an item to the end of the stack."),
+  items: z.array(ItemSchema).min(1).max(500),
+});
+
+type ConfigShape = z.infer<typeof SessionConfigBaseSchema>;
+
+function actionIdsOf(config: ConfigShape): Set<string> {
+  return new Set([KEEP, DISPOSE, ...config.extra_actions.map((a) => a.id)]);
+}
+
+function refineConfig(config: ConfigShape, ctx: z.RefinementCtx) {
+  const ids = new Set<string>();
+  for (const [i, item] of config.items.entries()) {
+    if (ids.has(item.id)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["items", i, "id"],
+        message: `duplicate item id ${item.id}`,
+      });
+    }
+    ids.add(item.id);
+  }
+  const actionIds = new Set<string>([KEEP, DISPOSE]);
+  for (const [i, action] of config.extra_actions.entries()) {
+    if (actionIds.has(action.id)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["extra_actions", i, "id"],
+        message: `duplicate action id ${action.id}`,
+      });
+    }
+    actionIds.add(action.id);
+  }
+  for (const [i, item] of config.items.entries()) {
+    if (item.suggestion && !actionIds.has(item.suggestion.action)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["items", i, "suggestion", "action"],
+        message: `unknown action ${item.suggestion.action}`,
+      });
+    }
+  }
+}
+
+export const SessionConfigSchema = SessionConfigBaseSchema.superRefine(refineConfig);
+export type SessionConfig = z.infer<typeof SessionConfigSchema>;
+export type SessionConfigInput = z.input<typeof SessionConfigSchema>;
 
 export const SessionStatusSchema = z.enum(["open", "done"]);
 export type SessionStatus = z.infer<typeof SessionStatusSchema>;
 
-// The persisted session. `queue` is the undecided item ids in display order;
-// a skip rotates an id to the end, an undo puts it back at the front.
+// The app's session. `queue` is the undecided item ids in display order; a
+// skip rotates an id to the end, an undo puts it back at the front.
 export const SessionSchema = z.object({
   id: z.string().min(1),
-  owner: z.string().min(1),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
-  version: z.number().int().nonnegative(),
-  status: SessionStatusSchema,
   config: SessionConfigSchema,
   decisions: z.record(z.string(), DecisionSchema),
   queue: z.array(z.string()),
+  status: SessionStatusSchema,
+  updated_at: z.iso.datetime(),
 });
 export type Session = z.infer<typeof SessionSchema>;
 
-export const SessionSummarySchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  status: SessionStatusSchema,
-  total: z.number().int(),
-  decided: z.number().int(),
-  created_at: z.iso.datetime(),
-  updated_at: z.iso.datetime(),
+// ---- pare-start ---------------------------------------------------------------
+
+export const SESSION_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{2,39}$/;
+
+// The un-refined shape is what the MCP SDK advertises as the input schema; the
+// handler and the app parse with the refined StartInputSchema.
+export const StartInputBaseSchema = SessionConfigBaseSchema.extend({
+  session_id: z
+    .string()
+    .regex(SESSION_ID_PATTERN, "3 to 40 chars: lowercase letters, digits, - or _")
+    .optional()
+    .describe(
+      "Continue an earlier session: pass the id from its context update. Omit to start a new one.",
+    ),
+  decisions: z
+    .array(DecisionSchema)
+    .max(500)
+    .default([])
+    .describe(
+      "Decisions to restore when continuing a session, copied from its last context update. " +
+        "Items not listed here start undecided.",
+    ),
 });
-export type SessionSummary = z.infer<typeof SessionSummarySchema>;
 
-// ---- Tool inputs and outputs ------------------------------------------------
+export const StartInputSchema = StartInputBaseSchema.superRefine((input, ctx) => {
+  refineConfig(input, ctx);
+  const itemIds = new Set(input.items.map((item) => item.id));
+  const actionIds = actionIdsOf(input);
+  for (const [i, decision] of input.decisions.entries()) {
+    if (!itemIds.has(decision.item_id)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["decisions", i, "item_id"],
+        message: `no item with id ${decision.item_id}`,
+      });
+    }
+    if (!actionIds.has(decision.action)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["decisions", i, "action"],
+        message: `unknown action ${decision.action}`,
+      });
+    }
+  }
+});
+export type StartInput = z.infer<typeof StartInputSchema>;
 
-// pare-start: the model opens a session. Returns StartResult to both the model
-// and the app; the app then calls pare-load for the full session so the
-// model's context does not carry every item twice.
-export const StartInputSchema = SessionConfigSchema;
 export const StartResultSchema = z.object({
   session_id: z.string(),
   title: z.string(),
   total: z.number().int(),
+  decided: z.number().int(),
 });
 export type StartResult = z.infer<typeof StartResultSchema>;
-
-// pare-resume: reopen an existing session in the app.
-export const ResumeInputSchema = z.object({ session_id: z.string().min(1) });
-export const ResumeResultSchema = StartResultSchema.extend({
-  decided: z.number().int(),
-  status: SessionStatusSchema,
-});
-export type ResumeResult = z.infer<typeof ResumeResultSchema>;
-
-// pare-load (app only): the full session, including saved decisions.
-export const LoadInputSchema = z.object({ session_id: z.string().min(1) });
-export const LoadResultSchema = z.object({ session: SessionSchema });
-export type LoadResult = z.infer<typeof LoadResultSchema>;
-
-// pare-record (app only): a batch of changes since the last flush. Decisions
-// upsert by item id, `undo` removes decisions, `queue` replaces the order of
-// undecided ids. The server drops queue entries that are decided or unknown
-// and appends undecided ids the client forgot, so a stale client cannot
-// lose items.
-export const RecordInputSchema = z.object({
-  session_id: z.string().min(1),
-  decisions: z.array(DecisionSchema).max(500).default([]),
-  undo: z.array(z.string()).max(500).default([]),
-  queue: z.array(z.string()).max(500).optional(),
-  status: SessionStatusSchema.optional(),
-});
-export type RecordInput = z.input<typeof RecordInputSchema>;
-export const RecordResultSchema = z.object({
-  version: z.number().int(),
-  decided: z.number().int(),
-  total: z.number().int(),
-  status: SessionStatusSchema,
-});
-export type RecordResult = z.infer<typeof RecordResultSchema>;
-
-// pare-get-results: what the model reads back.
-export const GetResultsInputSchema = z.object({ session_id: z.string().min(1) });
-export const ResultDecisionSchema = z.object({
-  item_id: z.string(),
-  title: z.string(),
-  action: z.string(),
-  label: z.string(),
-  note: z.string().optional(),
-});
-export const GetResultsResultSchema = z.object({
-  session_id: z.string(),
-  title: z.string(),
-  status: SessionStatusSchema,
-  total: z.number().int(),
-  decided: z.number().int(),
-  counts: z.record(z.string(), z.number().int()).describe("Decision count per action id."),
-  decisions: z.array(ResultDecisionSchema),
-  undecided: z.array(z.object({ item_id: z.string(), title: z.string() })),
-});
-export type GetResultsResult = z.infer<typeof GetResultsResultSchema>;
-
-export const ListSessionsInputSchema = z.object({
-  limit: z.number().int().min(1).max(50).default(10),
-});
-export const ListSessionsResultSchema = z.object({ sessions: z.array(SessionSummarySchema) });
 
 // ---- Helpers used on both sides -------------------------------------------
 
@@ -242,82 +216,29 @@ export function actionLabel(config: SessionConfig, actionId: string): string {
   return config.extra_actions.find((a) => a.id === actionId)?.label ?? actionId;
 }
 
-export function summarize(session: Session): SessionSummary {
+// Turn validated pare-start input into a session. Restored decisions keep
+// their timestamps; the queue is every item not yet decided, in order.
+export function buildSession(input: StartInput, sessionId: string, now: string): Session {
+  const { session_id: _ignored, decisions: seed, ...config } = input;
+  const decisions: Record<string, Decision> = {};
+  for (const decision of seed) decisions[decision.item_id] = decision;
   return {
-    id: session.id,
-    title: session.config.title,
-    status: session.status,
-    total: session.config.items.length,
-    decided: Object.keys(session.decisions).length,
-    created_at: session.created_at,
-    updated_at: session.updated_at,
-  };
-}
-
-export function toResults(session: Session): GetResultsResult {
-  const byId = new Map(session.config.items.map((item) => [item.id, item]));
-  const counts: Record<string, number> = {};
-  const decisions = session.config.items
-    .filter((item) => session.decisions[item.id])
-    .map((item) => {
-      const decision = session.decisions[item.id]!;
-      counts[decision.action] = (counts[decision.action] ?? 0) + 1;
-      const row: z.infer<typeof ResultDecisionSchema> = {
-        item_id: item.id,
-        title: item.title,
-        action: decision.action,
-        label: actionLabel(session.config, decision.action),
-      };
-      if (decision.note) row.note = decision.note;
-      return row;
-    });
-  const undecided = session.queue
-    .map((id) => byId.get(id))
-    .filter((item): item is Item => item !== undefined)
-    .map((item) => ({ item_id: item.id, title: item.title }));
-  return {
-    session_id: session.id,
-    title: session.config.title,
-    status: session.status,
-    total: session.config.items.length,
-    decided: decisions.length,
-    counts,
+    id: sessionId,
+    config,
     decisions,
-    undecided,
-  };
-}
-
-// Apply a pare-record batch to a session. Pure, so both the server and the
-// app's optimistic state can share it.
-export function applyRecord(
-  session: Session,
-  input: z.infer<typeof RecordInputSchema>,
-  now: string,
-): Session {
-  const itemIds = new Set(session.config.items.map((item) => item.id));
-  const decisions = { ...session.decisions };
-  for (const id of input.undo) delete decisions[id];
-  for (const decision of input.decisions) {
-    if (itemIds.has(decision.item_id)) decisions[decision.item_id] = decision;
-  }
-  const requested = input.queue ?? session.queue;
-  const seen = new Set<string>();
-  const queue: string[] = [];
-  for (const id of requested) {
-    if (itemIds.has(id) && !decisions[id] && !seen.has(id)) {
-      seen.add(id);
-      queue.push(id);
-    }
-  }
-  for (const item of session.config.items) {
-    if (!decisions[item.id] && !seen.has(item.id)) queue.push(item.id);
-  }
-  return {
-    ...session,
-    decisions,
-    queue,
-    status: input.status ?? session.status,
+    queue: config.items.filter((item) => !decisions[item.id]).map((item) => item.id),
+    status: "open",
     updated_at: now,
-    version: session.version + 1,
   };
+}
+
+export function countDecisions(session: Session): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const id of [DISPOSE, KEEP, ...session.config.extra_actions.map((a) => a.id)]) {
+    counts.set(id, 0);
+  }
+  for (const decision of Object.values(session.decisions)) {
+    counts.set(decision.action, (counts.get(decision.action) ?? 0) + 1);
+  }
+  return counts;
 }

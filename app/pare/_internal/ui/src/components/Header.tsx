@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ExpandIcon, MoreIcon, UndoIcon } from "./icons";
 
-export type SaveState = "idle" | "saving" | "saved" | "error";
-
 interface HeaderProps {
   title: string;
   description?: string;
   decided: number;
   total: number;
-  saveState: SaveState;
   canUndo: boolean;
   onUndo: () => void;
   fullscreen: boolean;
@@ -28,7 +25,6 @@ export function Header(props: HeaderProps) {
           {props.description && <p className="pare-header__desc">{props.description}</p>}
         </div>
         <div className="pare-header__side">
-          <SaveIndicator state={props.saveState} />
           <span className="pare-count" data-testid="progress">
             <b>{decided}</b> of {total}
           </span>
@@ -64,20 +60,6 @@ export function Header(props: HeaderProps) {
         <div className="pare-bar__fill" style={{ width: `${pct}%` }} />
       </div>
     </>
-  );
-}
-
-function SaveIndicator({ state }: { state: SaveState }) {
-  const label = state === "saving" ? "Saving…" : state === "error" ? "Not saved" : "Saved";
-  return (
-    <span
-      className={"pare-save" + (state === "error" ? " pare-save--error" : "")}
-      style={{ opacity: state === "idle" ? 0 : 1 }}
-      data-testid="save-state"
-      data-state={state}
-    >
-      {label}
-    </span>
   );
 }
 

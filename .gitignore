@@ -48,3 +48,4 @@ next-env.d.ts
 /app/pare/_internal/ui/dist
 /test-results
 /playwright-report
+/app/pare/_internal/ui/variants

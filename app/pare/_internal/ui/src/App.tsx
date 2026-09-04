@@ -1,42 +1,47 @@
-// The pare app. Connects to the MCP host, loads the session named by the
-// tool result, then runs the triage loop: keyboard, gestures, batched saves,
+// The pare app. Connects to the MCP host, builds the session from the
+// pare-start input the host replays, restores any cached progress, then runs
+// the triage loop: keyboard, gestures, a context update after every change,
 // and the summary that pushes decisions back to the chat.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { applyDocumentTheme, type McpUiDisplayMode } from "@modelcontextprotocol/ext-apps";
 import { useApp } from "@modelcontextprotocol/ext-apps/react";
-import { DISPOSE, KEEP, StartResultSchema, actionLabel, type Item } from "../../schema";
+import { z } from "zod";
+import {
+  DISPOSE,
+  KEEP,
+  StartInputSchema,
+  StartResultSchema,
+  actionLabel,
+  buildSession,
+  type Item,
+  type Session,
+} from "../../schema";
 import { createHostBridge, type HostBridge } from "./host";
-import { progressContext, resultsMessage } from "./messages";
+import { contextUpdate, resultsMessage } from "./messages";
 import * as S from "./state";
+import { loadCached, mergeCached, saveCached } from "./storage";
 import { ActionBar, Legend } from "./components/ActionBar";
 import { CardStack, type StackApi } from "./components/CardStack";
-import { Header, Menu, type SaveState } from "./components/Header";
+import { Header, Menu } from "./components/Header";
 import { NoteField } from "./components/NoteField";
 import { Summary } from "./components/Summary";
 
-type Phase =
-  | { kind: "connecting" }
-  | { kind: "waiting" }
-  | { kind: "loading" }
-  | { kind: "ready" }
-  | { kind: "error"; message: string };
+const CONTEXT_DELAY = 250;
 
-const FLUSH_DELAY = 450;
-const RETRY_DELAY = 3000;
+type ToolResult = { ok: true; sessionId: string } | { ok: false; message: string };
 
 export function App() {
-  const [phase, setPhase] = useState<Phase>({ kind: "connecting" });
-  const [toolResult, setToolResult] = useState<
-    { ok: true; sessionId: string } | { ok: false; message: string } | null
-  >(null);
+  const [toolInput, setToolInput] = useState<unknown>(undefined);
+  const [toolResult, setToolResult] = useState<ToolResult | null>(null);
   const [displayMode, setDisplayMode] = useState<McpUiDisplayMode>("inline");
   const [safeBottom, setSafeBottom] = useState(0);
 
   const { app, isConnected, error } = useApp({
-    appInfo: { name: "pare", version: "0.1.0" },
+    appInfo: { name: "pare", version: "0.2.0" },
     capabilities: { availableDisplayModes: ["inline", "fullscreen"] },
     onAppCreated(created) {
+      created.ontoolinput = ({ arguments: args }) => setToolInput(args ?? {});
       created.ontoolresult = (result) => {
         if (result.isError) {
           const text = (result.content ?? [])
@@ -75,29 +80,25 @@ export function App() {
     if (ctx?.safeAreaInsets) setSafeBottom(ctx.safeAreaInsets.bottom);
   }, [app, isConnected]);
 
-  useEffect(() => {
-    if (error)
-      setPhase({ kind: "error", message: `Could not connect to the host: ${error.message}` });
-    else if (!isConnected) setPhase({ kind: "connecting" });
-    else if (!toolResult) setPhase({ kind: "waiting" });
-  }, [error, isConnected, toolResult]);
+  // The session is built once, from the tool input and the cache.
+  const session = useMemo<Session | { error: string } | null>(() => {
+    if (!toolResult || toolInput === undefined) return null;
+    if (!toolResult.ok) return { error: toolResult.message };
+    const parsed = StartInputSchema.safeParse(toolInput);
+    if (!parsed.success) return { error: `Invalid session: ${z.prettifyError(parsed.error)}` };
+    const fresh = buildSession(parsed.data, toolResult.sessionId, new Date().toISOString());
+    return mergeCached(fresh, loadCached(fresh.id));
+  }, [toolInput, toolResult]);
 
-  if (phase.kind === "error") {
-    return <Status error>{phase.message}</Status>;
-  }
-  if (!host || !toolResult) {
-    return (
-      <Status>{phase.kind === "connecting" ? "Connecting…" : "Waiting for the session…"}</Status>
-    );
-  }
-  if (!toolResult.ok) {
-    return <Status error>{toolResult.message}</Status>;
-  }
+  if (error) return <Status error>Could not connect to the host: {error.message}</Status>;
+  if (!host) return <Status>Connecting…</Status>;
+  if (!session) return <Status>Waiting for the session…</Status>;
+  if ("error" in session) return <Status error>{session.error}</Status>;
   return (
     <Triage
-      key={toolResult.sessionId}
+      key={session.id}
       host={host}
-      sessionId={toolResult.sessionId}
+      initial={session}
       displayMode={displayMode}
       onDisplayMode={setDisplayMode}
       safeBottom={safeBottom}
@@ -118,178 +119,151 @@ function Status({ children, error = false }: { children: React.ReactNode; error?
 
 interface TriageProps {
   host: HostBridge;
-  sessionId: string;
+  initial: Session;
   displayMode: McpUiDisplayMode;
   onDisplayMode: (mode: McpUiDisplayMode) => void;
   safeBottom: number;
 }
 
-function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: TriageProps) {
-  // The triage state lives in a ref and re-renders are requested explicitly,
-  // so a burst of keypresses and the save loop both see the latest state
-  // synchronously instead of racing through React's batching.
-  const stateRef = useRef<S.TriageState | null>(null);
-  const [, rerender] = useReducer((n: number) => n + 1, 0);
-  const update = useCallback((fn: (state: S.TriageState) => S.TriageState) => {
-    if (!stateRef.current) return;
-    stateRef.current = fn(stateRef.current);
-    rerender();
-  }, []);
+const now = () => new Date().toISOString();
 
-  const [loadError, setLoadError] = useState<string | null>(null);
+function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: TriageProps) {
+  // The triage state lives in a ref and re-renders are requested explicitly,
+  // so a burst of keypresses sees the latest state synchronously instead of
+  // racing through React's batching.
+  const stateRef = useRef<S.TriageState>(S.initialState(initial));
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+
   const [note, setNote] = useState("");
   const noteRef = useRef("");
   noteRef.current = note;
+  // The note field appears on the first typed letter and stays until the
+  // card is decided, so the deck keeps keyboard focus the rest of the time.
+  const [noteOpen, setNoteOpen] = useState(false);
+  const noteOpenRef = useRef(false);
+  noteOpenRef.current = noteOpen;
   const [expanded, setExpanded] = useState(false);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState<"final" | "progress" | null>(null);
+  const [sent, setSent] = useState<"final" | "progress" | null>(
+    initial.status === "done" ? "final" : null,
+  );
   const [sendError, setSendError] = useState<string | null>(null);
   const stackApi = useRef<StackApi | null>(null);
   const noteInput = useRef<HTMLTextAreaElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const inFlight = useRef(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const contextTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Load the session, including decisions saved by an earlier mount.
-  useEffect(() => {
-    let cancelled = false;
-    host.loadSession(sessionId).then((result) => {
-      if (cancelled) return;
-      if (result.ok) {
-        stateRef.current = S.initialState(result.value);
-        rerender();
-      } else {
-        setLoadError(result.message);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [host, sessionId]);
+  // ---- Persistence ----------------------------------------------------------
+  // Every change goes to browser storage at once and to the model's context
+  // shortly after (debounced so a fast run of keypresses sends one update).
 
-  const state = stateRef.current;
-
-  // ---- Saving ---------------------------------------------------------------
-
-  const flush = useCallback(async (): Promise<void> => {
-    const current = stateRef.current;
-    if (!current || inFlight.current || !S.hasPending(current.pending)) return;
-    const { state: cleared, input } = S.takePending(current);
-    stateRef.current = cleared;
-    inFlight.current = true;
-    setSaveState("saving");
-    const result = await host.record(input);
-    inFlight.current = false;
-    if (result.ok) {
-      setSaveState("saved");
-      const latest = stateRef.current;
-      if (latest) void host.updateModelContext(progressContext(latest.session));
-    } else {
-      setSaveState("error");
-      update((s) => S.restorePending(s, input));
-      scheduleFlush(RETRY_DELAY);
-    }
-    if (stateRef.current && S.hasPending(stateRef.current.pending)) scheduleFlush(FLUSH_DELAY);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  const pushContext = useCallback(() => {
+    const update = contextUpdate(stateRef.current.session);
+    return host.updateModelContext(update.text, update.structured);
   }, [host]);
 
-  const scheduleFlush = useCallback(
-    (delay: number) => {
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => {
-        timer.current = null;
-        void flush();
-      }, delay);
-    },
-    [flush],
-  );
-
   const commit = useCallback(
-    (fn: (state: S.TriageState) => S.TriageState, flushDelay = FLUSH_DELAY) => {
-      update(fn);
-      if (stateRef.current && S.hasPending(stateRef.current.pending)) scheduleFlush(flushDelay);
+    (fn: (state: S.TriageState) => S.TriageState) => {
+      stateRef.current = fn(stateRef.current);
+      rerender();
+      saveCached(stateRef.current.session);
+      if (contextTimer.current) clearTimeout(contextTimer.current);
+      contextTimer.current = setTimeout(() => {
+        contextTimer.current = null;
+        void pushContext();
+      }, CONTEXT_DELAY);
     },
-    [update, scheduleFlush],
+    [pushContext],
   );
 
   useEffect(
     () => () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (contextTimer.current) clearTimeout(contextTimer.current);
     },
     [],
   );
 
   // ---- Decisions ------------------------------------------------------------
 
-  // Keyboard shortcuts need focus inside the iframe. The note field takes it
-  // when there is one; otherwise the app root does.
-  const focusNote = () => (noteInput.current ?? rootRef.current)?.focus({ preventScroll: true });
+  // Keyboard shortcuts need focus inside the iframe; the app root holds it.
+  const focusRoot = () => rootRef.current?.focus({ preventScroll: true });
+  const focusNoteEnd = () => {
+    const el = noteInput.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  };
+  const resetCard = () => {
+    setNote("");
+    setNoteOpen(false);
+    setExpanded(false);
+    focusRoot();
+  };
+  const openNote = (text: string) => {
+    if (noteOpenRef.current) {
+      // Letters can land before the field takes focus; append them.
+      setNote((n) => n + text);
+    } else {
+      setNoteOpen(true);
+      setNote(text);
+    }
+    setTimeout(focusNoteEnd, 0);
+  };
 
   const act = useCallback(
     (actionId: string, viaSwipe = false) => {
       const current = stateRef.current;
-      const item = current && itemById(current, current.session.queue[0]);
-      if (!current || !item) return;
+      const item = itemById(current, current.session.queue[0]);
+      if (!item) return;
       if (!viaSwipe) {
         const kind = actionId === KEEP ? "keep" : actionId === DISPOSE ? "dispose" : "fade";
         stackApi.current?.exit(item.id, kind, actionLabel(current.session.config, actionId));
       }
-      commit((s) => S.decide(s, item.id, actionId, noteRef.current, new Date().toISOString()));
-      setNote("");
-      setExpanded(false);
+      commit((s) => S.decide(s, item.id, actionId, noteRef.current, now()));
       setSent((prev) => (prev === "final" ? null : prev));
-      focusNote();
+      resetCard();
     },
     [commit],
   );
 
   const skipTop = useCallback(() => {
     const current = stateRef.current;
-    const item = current && itemById(current, current.session.queue[0]);
-    if (!current || !item || current.session.queue.length < 2) return;
+    const item = itemById(current, current.session.queue[0]);
+    if (!item || current.session.queue.length < 2) return;
     stackApi.current?.exit(item.id, "skip", "Later");
-    commit((s) => S.skip(s, item.id));
-    setNote("");
-    setExpanded(false);
-    focusNote();
+    commit((s) => S.skip(s, item.id, now()));
+    resetCard();
   }, [commit]);
 
   const undo = useCallback(() => {
-    const current = stateRef.current;
-    if (!current || !S.canUndo(current)) return;
-    commit((s) => S.undo(s));
-    setNote("");
-    setExpanded(false);
-    focusNote();
+    if (!S.canUndo(stateRef.current)) return;
+    commit((s) => S.undo(s, now()));
+    resetCard();
   }, [commit]);
 
   const revisit = useCallback(
     (itemId: string) => {
-      commit((s) => S.revisit(s, itemId));
+      commit((s) => S.revisit(s, itemId, now()));
       setSent(null);
       setSendError(null);
-      setTimeout(focusNote, 0);
+      setTimeout(focusRoot, 0);
     },
     [commit],
   );
 
   const send = useCallback(
     async (final: boolean) => {
-      const current = stateRef.current;
-      if (!current) return;
       setSending(true);
       setSendError(null);
-      if (final) update((s) => S.setStatus(s, "done"));
-      if (timer.current) clearTimeout(timer.current);
-      await flush();
-      const latest = stateRef.current ?? current;
-      const result = await host.sendMessage(resultsMessage(latest.session, final));
+      if (final) commit((s) => S.setStatus(s, "done", now()));
+      if (contextTimer.current) clearTimeout(contextTimer.current);
+      await pushContext();
+      const result = await host.sendMessage(resultsMessage(stateRef.current.session, final));
       if (result.ok) setSent(final ? "final" : "progress");
       else setSendError(result.message);
       setSending(false);
     },
-    [flush, host, update],
+    [commit, host, pushContext],
   );
 
   const toggleFullscreen = useCallback(async () => {
@@ -297,63 +271,82 @@ function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: Tri
       displayMode === "fullscreen" ? "inline" : "fullscreen",
     );
     onDisplayMode(mode);
-    focusNote();
+    focusRoot();
   }, [displayMode, host, onDisplayMode]);
 
   // ---- Keyboard -------------------------------------------------------------
-
-  const queueRef = useRef<string[]>([]);
-  queueRef.current = state?.session.queue ?? [];
+  // With the deck focused: arrows and Enter decide, digits pick extra actions,
+  // any other printable key opens the note. Inside the note: Enter decides,
+  // modifier plus arrow decides, Escape returns to the deck.
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const current = stateRef.current;
-      if (!current || current.session.queue.length === 0) return;
+      if (current.session.queue.length === 0) return;
       const target = e.target as HTMLElement | null;
-      const inField = target === noteInput.current;
-      const typing =
-        !inField && target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(target.tagName);
-      if (typing) return;
-      const empty = noteRef.current.trim().length === 0;
-      const free = !inField || empty;
+      const inNote = target === noteInput.current;
+      const typingElsewhere =
+        !inNote && target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(target.tagName);
+      if (typingElsewhere) return;
       const mod = e.metaKey || e.ctrlKey;
       const config = current.session.config;
       const top = itemById(current, current.session.queue[0]);
-
+      const confirmAction = top?.suggestion?.action ?? KEEP;
       const handle = (fn: () => void) => {
         e.preventDefault();
         fn();
       };
 
-      if (e.key === "ArrowRight" && (mod || free)) return handle(() => act(KEEP));
-      if (e.key === "ArrowLeft" && (mod || free)) return handle(() => act(DISPOSE));
-      if (e.key === "Enter" && !e.shiftKey) {
-        return handle(() => act(top?.suggestion?.action ?? KEEP));
+      if (inNote) {
+        if (e.key === "Enter" && !e.shiftKey) return handle(() => act(confirmAction));
+        if (e.key === "ArrowRight" && mod) return handle(() => act(KEEP));
+        if (e.key === "ArrowLeft" && mod) return handle(() => act(DISPOSE));
+        if (e.key === "ArrowDown" && mod && config.skip) return handle(skipTop);
+        if (e.key === "Escape") {
+          return handle(() => {
+            if (noteRef.current.trim().length === 0) setNoteOpen(false);
+            focusRoot();
+          });
+        }
+        return;
       }
-      if (e.key === "ArrowDown" && (mod || free) && config.skip) return handle(skipTop);
-      if (e.key === "ArrowUp" && free) return handle(() => setExpanded((v) => !v));
-      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey && free) return handle(undo);
-      if (e.key === "Escape" && expanded) return handle(() => setExpanded(false));
-      if (!mod && !e.altKey && free && e.key.length === 1) {
-        const extra = config.extra_actions.find((a) => a.key === e.key.toLowerCase());
+
+      if (e.key === "ArrowRight") return handle(() => act(KEEP));
+      if (e.key === "ArrowLeft") return handle(() => act(DISPOSE));
+      if (e.key === "Enter") return handle(() => act(confirmAction));
+      if (e.key === "ArrowDown" && config.skip) return handle(skipTop);
+      if (e.key === "ArrowUp") {
+        return handle(() => {
+          if (expanded || stackApi.current?.canExpand()) setExpanded((v) => !v);
+        });
+      }
+      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey) return handle(undo);
+      if (e.key === "Escape") return handle(() => setExpanded(false));
+      if (mod || e.altKey || e.key.length !== 1) return;
+      if (/^[1-4]$/.test(e.key)) {
+        const extra = config.extra_actions[Number(e.key) - 1];
         if (extra) return handle(() => act(extra.id));
+        return;
+      }
+      // A space alone does not open a note, but once one is open every
+      // printable key belongs to it, even before the field takes focus.
+      if (config.notes && (e.key !== " " || noteOpenRef.current)) {
+        return handle(() => openNote(e.key));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [act, skipTop, undo, expanded]);
 
-  // Autofocus the note once the deck is on screen.
-  const ready = state !== null;
+  // Focus the deck once it is on screen.
   useEffect(() => {
-    if (ready) focusNote();
-  }, [ready]);
+    focusRoot();
+  }, []);
 
   // ---- Render ---------------------------------------------------------------
 
-  if (loadError) return <Status error>{loadError}</Status>;
-  if (!state) return <Status>Loading the session…</Status>;
-
+  const state = stateRef.current;
   const { session } = state;
   const { config } = session;
   const queueItems = session.queue
@@ -363,9 +356,7 @@ function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: Tri
   const { decided, total } = S.progress(session);
   const fullscreen = displayMode === "fullscreen";
   const remaining = session.queue.length;
-  const enterLabel = top?.suggestion
-    ? `${actionLabel(config, top.suggestion.action)} (suggested)`
-    : config.keep.label;
+  const enterLabel = actionLabel(config, top?.suggestion?.action ?? KEEP);
 
   const menu = (
     <Menu
@@ -379,13 +370,13 @@ function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: Tri
           label: `${config.keep.label} all remaining (${remaining})`,
           disabled: remaining === 0,
           confirm: `${config.keep.label} ${remaining} remaining?`,
-          onSelect: () => commit((s) => S.decideAllRemaining(s, KEEP, new Date().toISOString())),
+          onSelect: () => commit((s) => S.decideAllRemaining(s, KEEP, now())),
         },
         {
           label: `${config.dispose.label} all remaining (${remaining})`,
           disabled: remaining === 0,
           confirm: `${config.dispose.label} ${remaining} remaining?`,
-          onSelect: () => commit((s) => S.decideAllRemaining(s, DISPOSE, new Date().toISOString())),
+          onSelect: () => commit((s) => S.decideAllRemaining(s, DISPOSE, now())),
         },
       ]}
     />
@@ -404,7 +395,6 @@ function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: Tri
         description={config.description}
         decided={decided}
         total={total}
-        saveState={saveState}
         canUndo={S.canUndo(state)}
         onUndo={undo}
         fullscreen={fullscreen}
@@ -421,22 +411,33 @@ function Triage({ host, sessionId, displayMode, onDisplayMode, safeBottom }: Tri
             expanded={expanded}
             onToggleExpanded={() => {
               setExpanded((v) => !v);
-              focusNote();
+              focusRoot();
             }}
             onSwipe={(itemId, action) => {
-              if (itemId === queueRef.current[0]) act(action, true);
+              if (itemId === stateRef.current.session.queue[0]) act(action, true);
             }}
             onOpenLink={(url) => void host.openLink(url)}
             apiRef={stackApi}
           />
-          {config.notes && (
-            <NoteField
-              value={note}
-              onChange={setNote}
-              enterLabel={enterLabel}
-              inputRef={noteInput}
-            />
-          )}
+          {config.notes &&
+            (noteOpen ? (
+              <NoteField
+                value={note}
+                onChange={setNote}
+                enterLabel={enterLabel}
+                inputRef={noteInput}
+              />
+            ) : (
+              <button
+                type="button"
+                className="pare-note-open"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => openNote("")}
+                data-testid="note-open"
+              >
+                Type to add a note
+              </button>
+            ))}
           <ActionBar
             config={config}
             canSkip={remaining > 1}

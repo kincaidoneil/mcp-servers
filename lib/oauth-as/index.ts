@@ -18,7 +18,7 @@ export {
   createTokenRoute,
 } from "./routes";
 export { escapeHtml, htmlErrorPage } from "./html";
-export { extractIdentity, extractUpstreamToken, protectMcpHandler } from "./bridge";
+export { extractUpstreamToken, protectMcpHandler } from "./bridge";
 export {
   decodeSigningKey,
   loadOAuthConfigFromEnv,

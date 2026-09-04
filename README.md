@@ -63,35 +63,29 @@ Hevy has no OAuth; its API uses a static per-user key ([Hevy Pro](https://hevy.c
 
 Card-stack triage for the decisions an agent should not make alone: which newsletters to unsubscribe from, which tasks to drop, which files to archive. The agent opens a session with the items, the user works through them one card at a time in an [MCP App](https://github.com/modelcontextprotocol/ext-apps) inside the chat, and the decisions come back as a message with item ids and notes.
 
-| Tool                       | Description                                                                  |
-| :------------------------- | :--------------------------------------------------------------------------- |
-| `pare-start`               | Open a session in the app from a list of items and per-session action labels |
-| `pare-resume`              | Reopen an existing session where the user left off                           |
-| `pare-get-results`         | Decisions so far, grouped by action, with notes and the undecided items      |
-| `pare-list-sessions`       | Recent sessions with progress                                                |
-| `pare-load`, `pare-record` | App-only: load a session, save a batch of decisions                          |
+| Tool         | Description                                                                                 |
+| :----------- | :------------------------------------------------------------------------------------------ |
+| `pare-start` | Open a session in the app from a list of items and per-session action labels, or reopen one |
 
 Every session has two primary actions with fixed ids, `keep` (right) and `dispose` (left), whose labels the agent sets per task ("Stay subscribed" / "Unsubscribe"), plus up to four extra actions for a third bucket (Snooze, Delegate). Each card carries a title, a subtitle for the source, a plain-text body, label/value facts, tags, a link, and the agent's suggestion with a reason.
 
-In the app: `→` keeps, `←` disposes, `Enter` takes the card's suggestion (or keeps), `↓` moves the card to the bottom of the deck, `↑` expands a long body, `⌘Z` undoes. The note field is focused, so typing adds a note; with text in it, bare arrows move the caret and `⌘←` / `⌘→` decide. Cards also drag with the mouse and swipe with two fingers on a trackpad. Every decision saves as it happens, so a reload of the app or `pare-resume` picks up where the user stopped, and the model's context gets a one-line progress update after each save. The summary screen lists everything by action, lets the user revisit any item, and sends the full list to the chat; the menu can send progress mid-session or decide all remaining cards at once.
+In the app: `→` keeps, `←` disposes, `Enter` takes the card's suggestion (or keeps), `↓` moves the card to the bottom of the deck, `↑` expands a long body, `⌘Z` undoes. The note field is focused, so typing adds a note; with text in it, bare arrows move the caret and `⌘←` / `⌘→` decide. Cards also drag with the mouse and swipe with two fingers on a trackpad.
+
+The server holds nothing. After every decision the app updates the model's context with the whole list so far (quietly, without triggering a reply) and caches the session in browser storage, so a re-render of the conversation picks up where the user stopped. The summary screen sends the full list to the chat as a message. To continue in a later conversation, the agent calls `pare-start` again with the same items, the `session_id`, and the decisions from its context.
 
 #### Setup
 
-1. **Access codes.** Set `PARE_ACCESS_CODES` to comma-separated `name:code` pairs, e.g. `kincaid:$(openssl rand -hex 16)`. The name scopes stored sessions; nothing else is connected.
-
-2. **Storage.** Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (or the `KV_REST_API_URL` / `KV_REST_API_TOKEN` names the Vercel Marketplace Upstash integration sets). Sessions expire after 90 days. Without these, sessions live in process memory and are lost on a cold start, which is fine for local development.
-
-3. **Connect the MCP.** Add `<PUBLIC_BASE_URL>/pare` to the agent and paste the access code on the consent screen. Claude.ai, Claude Desktop, and ChatGPT render MCP Apps.
+Add `<PUBLIC_BASE_URL>/pare` to the agent. No credentials, no environment variables. Claude.ai, Claude Desktop, and ChatGPT render MCP Apps.
 
 #### Developing the UI
 
 The app is a React single-file build under [`app/pare/_internal/ui/`](./app/pare/_internal/ui/), served by the MCP server as the resource `ui://pare/app.html`.
 
 ```bash
-pnpm ui:dev     # harness at localhost:5173/harness.html: a stand-in host with fixtures, theme toggle, and a log of what the app sends to the chat
+pnpm ui:dev     # harness at localhost:5173/harness.html: a stand-in host with fixtures, theme toggle, and what the model would see
 pnpm ui:build   # writes app/pare/_internal/ui/dist/index.html (pnpm build runs this first)
 pnpm test:e2e   # Playwright against the harness, using the built file the way a real host does
-pnpm smoke:pare # OAuth handshake and every tool over HTTP against a running server
+pnpm smoke:pare # the tool and the resource over HTTP against a running server
 ```
 
 ## Architecture
@@ -102,19 +96,17 @@ flowchart LR
     bridge["mcp-servers · Vercel"]
     notion["Notion"]
     hevy["Hevy"]
-    redis["Upstash Redis"]
 
     client -->|"DCR · OAuth 2.1 · PKCE"| bridge
-    client <-->|"pare app · MCP Apps"| bridge
+    client <-->|"pare app · MCP Apps, no auth"| bridge
     bridge -->|"upstream OAuth"| notion
     notion -.->|"allowlist check on callback"| bridge
     bridge -->|"API-key validation"| hevy
-    bridge -->|"pare sessions"| redis
 ```
 
-Each service's endpoint is its own OAuth authorization server (shared code in [`lib/oauth-as/`](./lib/oauth-as/)): it issues the tokens clients use and handles the upstream credential underneath. For providers with OAuth (Notion), it brokers the upstream flow; for API-key providers (Hevy), the consent screen collects and validates the key instead. Pare has no upstream at all: its consent screen checks an access code.
+Each credentialed service's endpoint is its own OAuth authorization server (shared code in [`lib/oauth-as/`](./lib/oauth-as/)): it issues the tokens clients use and handles the upstream credential underneath. For providers with OAuth (Notion), it brokers the upstream flow; for API-key providers (Hevy), the consent screen collects and validates the key instead. Pare touches no upstream and no user data, so it has no auth.
 
-Auth holds no state: auth codes and access/refresh tokens are self-contained [`jose`](https://github.com/panva/jose) JWTs, so the OAuth server needs no database. To revoke all issued tokens, rotate `JWT_SIGNING_KEY`. The one store is Redis for pare sessions, keyed by the access-code name.
+It holds no state: auth codes and access/refresh tokens are self-contained [`jose`](https://github.com/panva/jose) JWTs, so the server needs no database or key-value store. To revoke all issued tokens, rotate `JWT_SIGNING_KEY`.
 
 ## Deployment
 

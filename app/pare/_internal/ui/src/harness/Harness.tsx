@@ -1,94 +1,51 @@
 // A stand-in MCP host for local development and E2E tests. It embeds the
 // app the way Claude does (HTML string into a sandboxed iframe, JSON-RPC over
-// postMessage), answers the app's tool calls from an in-memory store, and
-// shows what the app sends back to the chat.
+// postMessage), replays the pare-start input and result, and shows what the
+// app sends back: context updates after every decision, and chat messages.
 //
 // Query parameters: fixture=newsletters|tasks|terse, src=dist|dev,
-// theme=light|dark, fail=1 (make every save fail).
+// theme=light|dark.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { McpUiDisplayMode } from "@modelcontextprotocol/ext-apps";
-import {
-  LoadInputSchema,
-  RecordInputSchema,
-  SessionConfigSchema,
-  SessionSchema,
-  applyRecord,
-  toResults,
-  type Session,
-} from "../../../schema";
+import { z } from "zod";
+import { DecisionSchema, StartInputSchema, buildSession, type Decision } from "../../../schema";
 import { FIXTURES } from "../fixtures";
 
-type LogEntry = { kind: "message" | "context" | "tool" | "link" | "display"; text: string };
+type LogEntry = { kind: "message" | "context" | "link" | "display" | "tool"; text: string };
 
-const STORE_KEY = "pare-harness-store";
-
-function readStore(): Map<string, Session> {
-  try {
-    const raw = sessionStorage.getItem(STORE_KEY);
-    if (!raw) return new Map();
-    const parsed: unknown = JSON.parse(raw);
-    const out = new Map<string, Session>();
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed) {
-        const session = SessionSchema.safeParse(entry);
-        if (session.success) out.set(session.data.id, session.data);
-      }
-    }
-    return out;
-  } catch {
-    return new Map();
-  }
-}
-
-function writeStore(store: Map<string, Session>) {
-  sessionStorage.setItem(STORE_KEY, JSON.stringify([...store.values()]));
-}
-
-function sessionFor(fixture: string, store: Map<string, Session>): Session {
-  const id = `harness-${fixture}`;
-  const existing = store.get(id);
-  if (existing) return existing;
-  const config = SessionConfigSchema.parse(FIXTURES[fixture] ?? FIXTURES["newsletters"]);
-  const now = new Date().toISOString();
-  const session: Session = {
-    id,
-    owner: "harness",
-    created_at: now,
-    updated_at: now,
-    version: 0,
-    status: "open",
-    config,
-    decisions: {},
-    queue: config.items.map((item) => item.id),
-  };
-  store.set(id, session);
-  writeStore(store);
-  return session;
-}
+// What the model would see in its context after the app's latest update.
+const ContextSchema = z.object({
+  session_id: z.string(),
+  status: z.string(),
+  total: z.number(),
+  decided: z.number(),
+  decisions: z.array(DecisionSchema),
+});
+type ModelContext = z.infer<typeof ContextSchema>;
 
 const params = new URLSearchParams(window.location.search);
 
 export function Harness() {
   const [fixture, setFixture] = useState(params.get("fixture") ?? "newsletters");
-  const [src, setSrc] = useState<"dist" | "dev">(params.get("src") === "dev" ? "dev" : "dist");
+  const [src, setSrc] = useState(params.get("src") ?? "dist");
   const [theme, setTheme] = useState<"light" | "dark">(
     params.get("theme") === "dark" ? "dark" : "light",
   );
-  const [failSaves, setFailSaves] = useState(params.get("fail") === "1");
   const [displayMode, setDisplayMode] = useState<McpUiDisplayMode>("inline");
   const [log, setLog] = useState<LogEntry[]>([]);
+  const [context, setContext] = useState<ModelContext | null>(null);
   const [mountKey, setMountKey] = useState(0);
-  const [snapshot, setSnapshot] = useState<Session | null>(null);
-  const store = useRef(readStore());
+  // Decisions the "model" passes back into pare-start on the next mount.
+  const [seed, setSeed] = useState<Decision[]>([]);
   const bridge = useRef<AppBridge | null>(null);
-  const failRef = useRef(failSaves);
-  failRef.current = failSaves;
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const contextRef = useRef<ModelContext | null>(null);
+  contextRef.current = context;
 
   const pushLog = useCallback((entry: LogEntry) => setLog((l) => [...l, entry]), []);
-
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const sessionId = `harness-${fixture}`;
 
   useEffect(() => {
     document.documentElement.dataset["theme"] = theme;
@@ -99,17 +56,21 @@ export function Harness() {
     const iframe = iframeRef.current;
     if (!iframe) return;
     let cancelled = false;
-    const session = sessionFor(fixture, store.current);
-    setSnapshot(session);
+    const input = StartInputSchema.parse({
+      ...(FIXTURES[fixture] ?? FIXTURES["newsletters"]),
+      session_id: sessionId,
+      decisions: seed,
+    });
+    const session = buildSession(input, sessionId, new Date().toISOString());
 
     const host = new AppBridge(
       null,
-      { name: "pare-harness", version: "0.1.0" },
+      { name: "pare-harness", version: "0.2.0" },
       {
         openLinks: {},
         serverTools: {},
         logging: {},
-        updateModelContext: { text: {} },
+        updateModelContext: { text: {}, structuredContent: {} },
         message: { text: {} },
       },
       {
@@ -126,39 +87,8 @@ export function Harness() {
     bridge.current = host;
 
     host.oncalltool = async (request) => {
-      const name = request.name;
-      const args = request.arguments ?? {};
-      pushLog({ kind: "tool", text: `${name} ${JSON.stringify(args)}` });
-      if (name === "pare-load") {
-        const input = LoadInputSchema.parse(args);
-        const found = store.current.get(input.session_id);
-        if (!found) return { content: [{ type: "text", text: "not found" }], isError: true };
-        return { content: [{ type: "text", text: "ok" }], structuredContent: { session: found } };
-      }
-      if (name === "pare-record") {
-        await new Promise((r) => setTimeout(r, 120));
-        if (failRef.current) {
-          return { content: [{ type: "text", text: "simulated save failure" }], isError: true };
-        }
-        const input = RecordInputSchema.parse(args);
-        const current = store.current.get(input.session_id);
-        if (!current) return { content: [{ type: "text", text: "not found" }], isError: true };
-        const next = applyRecord(current, input, new Date().toISOString());
-        store.current.set(next.id, next);
-        writeStore(store.current);
-        setSnapshot(next);
-        const results = toResults(next);
-        return {
-          content: [{ type: "text", text: "saved" }],
-          structuredContent: {
-            version: next.version,
-            decided: results.decided,
-            total: results.total,
-            status: next.status,
-          },
-        };
-      }
-      return { content: [{ type: "text", text: `unknown tool ${name}` }], isError: true };
+      pushLog({ kind: "tool", text: `${request.name} ${JSON.stringify(request.arguments)}` });
+      return { content: [{ type: "text", text: `unknown tool ${request.name}` }], isError: true };
     };
     // oxlint-disable-next-line unicorn/prefer-add-event-listener -- AppBridge request handlers are setters
     host.onmessage = async (message) => {
@@ -173,6 +103,8 @@ export function Harness() {
         .map((block) => (block.type === "text" ? block.text : `[${block.type}]`))
         .join("\n");
       pushLog({ kind: "context", text });
+      const parsed = ContextSchema.safeParse(update.structuredContent);
+      if (parsed.success) setContext(parsed.data);
       return {};
     };
     host.onopenlink = async ({ url }) => {
@@ -196,13 +128,14 @@ export function Harness() {
       pushLog({ kind: "tool", text: `log ${entry.level}: ${JSON.stringify(entry.data)}` });
     };
     host.oninitialized = () => {
-      void host.sendToolInput({ arguments: session.config });
+      void host.sendToolInput({ arguments: input });
       void host.sendToolResult({
         content: [{ type: "text", text: `Opened pare session ${session.id}` }],
         structuredContent: {
           session_id: session.id,
           title: session.config.title,
           total: session.config.items.length,
+          decided: Object.keys(session.decisions).length,
         },
       });
     };
@@ -212,15 +145,18 @@ export function Harness() {
       if (!win) return;
       await host.connect(new PostMessageTransport(win, win));
       if (cancelled) return;
-      if (src === "dist") {
-        const response = await fetch("/dist/index.html");
+      if (src === "dev") {
+        iframe.src = "/index.html";
+      } else {
+        // "dist" is the production build; any other value is a built file
+        // under the UI folder, e.g. "variants/x" for variants/x.html.
+        const path = src === "dist" ? "/dist/index.html" : `/${src}.html`;
+        const response = await fetch(path);
         if (!response.ok) {
-          pushLog({ kind: "tool", text: "dist/index.html missing: run pnpm ui:build" });
+          pushLog({ kind: "tool", text: `${path} missing: run pnpm ui:build` });
           return;
         }
         iframe.srcdoc = await response.text();
-      } else {
-        iframe.src = "/index.html";
       }
     })();
 
@@ -232,14 +168,32 @@ export function Harness() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixture, src, mountKey]);
 
+  const clearCache = () => {
+    try {
+      localStorage.removeItem(`pare:session:${sessionId}`);
+    } catch {
+      // Storage may be unavailable; nothing to clear then.
+    }
+  };
+
+  // A fresh session: no cache, no seed.
   const restart = () => {
-    store.current.delete(`harness-${fixture}`);
-    writeStore(store.current);
+    clearCache();
+    setSeed([]);
+    setContext(null);
     setLog([]);
     setMountKey((k) => k + 1);
   };
 
-  const results = snapshot ? toResults(snapshot) : null;
+  // What a model would do in a new conversation: call pare-start again with
+  // the decisions from the last context update. The cache is cleared so the
+  // seed alone has to restore progress.
+  const reopenFromContext = () => {
+    clearCache();
+    setSeed(contextRef.current?.decisions ?? []);
+    setLog([]);
+    setMountKey((k) => k + 1);
+  };
 
   return (
     <div className={"harness" + (displayMode === "fullscreen" ? " harness--fullscreen" : "")}>
@@ -258,9 +212,10 @@ export function Harness() {
         </label>
         <label>
           Source
-          <select value={src} onChange={(e) => setSrc(e.target.value === "dev" ? "dev" : "dist")}>
+          <select value={src} onChange={(e) => setSrc(e.target.value)}>
             <option value="dist">dist/index.html (srcdoc, like a host)</option>
             <option value="dev">live dev server</option>
+            {src !== "dist" && src !== "dev" && <option value={src}>{src}.html</option>}
           </select>
         </label>
         <label>
@@ -273,44 +228,36 @@ export function Harness() {
             <option value="dark">dark</option>
           </select>
         </label>
-        <label className="harness__check">
-          <input
-            type="checkbox"
-            checked={failSaves}
-            onChange={(e) => setFailSaves(e.target.checked)}
-            data-testid="fail-saves"
-          />
-          Fail saves
-        </label>
         <div className="harness__buttons">
           <button type="button" onClick={() => setMountKey((k) => k + 1)} data-testid="remount">
             Remount iframe
           </button>
+          <button type="button" onClick={reopenFromContext} data-testid="reopen">
+            Reopen from context
+          </button>
           <button type="button" onClick={restart} data-testid="restart">
-            Restart session
+            Restart
           </button>
         </div>
 
-        <h2>Store</h2>
-        <div className="harness__store" data-testid="store">
-          {results ? (
+        <h2>Model context</h2>
+        <div className="harness__store" data-testid="context">
+          {context ? (
             <>
-              <div data-testid="store-decided">
-                {results.decided} of {results.total} decided · v{snapshot?.version} ·{" "}
-                {results.status}
+              <div data-testid="context-decided">
+                {context.decided} of {context.total} decided · {context.status}
               </div>
-              <ul data-testid="store-list">
-                {results.decisions.map((d) => (
+              <ul data-testid="context-list">
+                {context.decisions.map((d) => (
                   <li key={d.item_id} data-item-id={d.item_id} data-action={d.action}>
-                    {d.title}: {d.label}
+                    {d.item_id}: {d.action}
                     {d.note ? ` (${d.note})` : ""}
                   </li>
                 ))}
               </ul>
-              <div data-testid="store-queue">queue: {snapshot?.queue.join(", ")}</div>
             </>
           ) : (
-            "empty"
+            <span data-testid="context-decided">no update yet</span>
           )}
         </div>
 
@@ -357,8 +304,7 @@ const HARNESS_CSS = `
   .harness__panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; opacity: .6; margin: 14px 0 2px; }
   .harness__panel label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .harness__panel select { max-width: 190px; }
-  .harness__check { justify-content: flex-start !important; }
-  .harness__buttons { display: flex; gap: 6px; margin-top: 6px; }
+  .harness__buttons { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
   .harness__store { font-size: 12px; }
   .harness__store ul { margin: 4px 0; padding-left: 16px; }
   .harness__log { display: flex; flex-direction: column; gap: 6px; }

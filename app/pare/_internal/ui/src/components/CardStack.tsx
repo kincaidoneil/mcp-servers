@@ -24,6 +24,8 @@ export type ExitKind = "keep" | "dispose" | "skip" | "fade";
 export interface StackApi {
   // Animate `itemId` off the deck. The caller updates state in the same tick.
   exit(itemId: string, kind: ExitKind, label?: string): void;
+  // Whether the top card's body is clamped, so expanding would show more.
+  canExpand(): boolean;
 }
 
 interface CardStackProps {
@@ -66,6 +68,10 @@ export function CardStack({
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const opacity = useMotionValue(1);
+  // Stamps show only while the user is moving the card, not when a card
+  // slides back in after an undo.
+  const stampGate = useMotionValue(0);
+  const topOverflows = useRef(false);
   const [ghosts, setGhosts] = useState<Ghost[]>([]);
   const [dragging, setDragging] = useState(false);
   const ghostSeq = useRef(0);
@@ -75,7 +81,7 @@ export function CardStack({
 
   const stageWidth = () => stageRef.current?.clientWidth ?? 480;
   const commitDistance = () => Math.min(140, stageWidth() * 0.34);
-  const flyDistance = () => stageWidth() + 160;
+  const flyDistance = () => stageWidth() * 0.75;
 
   const latest = useRef({ items, onSwipe });
   latest.current = { items, onSwipe };
@@ -97,12 +103,14 @@ export function CardStack({
       },
     ]);
     if (isTop) {
+      stampGate.set(0);
       x.jump(0);
       y.jump(0);
     }
   }
 
   apiRef.current = {
+    canExpand: () => topOverflows.current,
     exit: (itemId, kind, label) =>
       launchGhost(
         itemId,
@@ -120,6 +128,7 @@ export function CardStack({
   }
 
   function settleBack() {
+    stampGate.set(0);
     if (reduceMotion) {
       x.jump(0);
       y.jump(0);
@@ -181,6 +190,7 @@ export function CardStack({
         return;
       }
       event.preventDefault();
+      stampGate.set(1);
       // Natural scrolling: fingers moving right report a negative deltaX.
       const next = x.get() - dx;
       x.set(next);
@@ -242,6 +252,7 @@ export function CardStack({
         d.active = true;
         event.currentTarget.setPointerCapture(event.pointerId);
         setDragging(true);
+        stampGate.set(1);
       } else if (Math.abs(dy) > 10) {
         drag.current = null;
         return;
@@ -273,7 +284,7 @@ export function CardStack({
     // A flick commits early, but only past a real distance: synthetic or
     // jittery input can report huge velocities over a few pixels.
     const flung =
-      Math.abs(d.vx) > 700 && Math.sign(d.vx) === Math.sign(current) && Math.abs(current) > 56;
+      Math.abs(d.vx) > 700 && Math.sign(d.vx) === Math.sign(current) && Math.abs(current) > 90;
     if (!cancelled && (Math.abs(current) >= commitDistance() || flung)) {
       commitSwipe(current > 0 ? 1 : -1);
     } else {
@@ -282,8 +293,14 @@ export function CardStack({
   }
 
   const rotate = useTransform(x, [-320, 320], [-11, 11]);
-  const keepStamp = useTransform(x, [16, STAMP_DISTANCE], [0, 1]);
-  const disposeStamp = useTransform(x, [-STAMP_DISTANCE, -16], [1, 0]);
+  // Past the commit distance the card dissolves, so a long drag never shows
+  // it clipped at the iframe edge.
+  const dragFade = useTransform(x, [-340, -150, 0, 150, 340], [0, 1, 1, 1, 0]);
+  const topOpacity = useTransform(() => dragFade.get() * opacity.get());
+  const keepBase = useTransform(x, [16, STAMP_DISTANCE], [0, 1]);
+  const disposeBase = useTransform(x, [-STAMP_DISTANCE, -16], [1, 0]);
+  const keepStamp = useTransform(() => keepBase.get() * stampGate.get());
+  const disposeStamp = useTransform(() => disposeBase.get() * stampGate.get());
 
   const behind = items.slice(1, 1 + VISIBLE_BEHIND);
 
@@ -310,7 +327,7 @@ export function CardStack({
         <motion.div
           key={top.id}
           className={"pare-card pare-card--top" + (dragging ? " is-dragging" : "")}
-          style={{ x, y, rotate, opacity, zIndex: 10 }}
+          style={{ x, y, rotate, opacity: topOpacity, zIndex: 10 }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={(e) => endDrag(e, false)}
@@ -330,6 +347,7 @@ export function CardStack({
             expanded={expanded}
             onToggleExpanded={onToggleExpanded}
             onOpenLink={onOpenLink}
+            onOverflow={(value) => (topOverflows.current = value)}
           >
             <Stamp kind="keep" label={config.keep.label} opacity={keepStamp} />
             <Stamp kind="dispose" label={config.dispose.label} opacity={disposeStamp} />
@@ -381,18 +399,24 @@ function GhostCard({
   onDone: () => void;
 }) {
   const { kind, fromX, fromY } = ghost;
+  // Flying cards fade over the last part of the flight, so they never reach
+  // the iframe edge where the host would clip them.
   const target =
     kind === "keep"
-      ? { x: flyDistance, y: fromY + 24, rotate: 16, opacity: 1 }
+      ? { x: flyDistance, y: fromY + 24, rotate: 14, opacity: [1, 1, 0] }
       : kind === "dispose"
-        ? { x: -flyDistance, y: fromY + 24, rotate: -16, opacity: 1 }
+        ? { x: -flyDistance, y: fromY + 24, rotate: -14, opacity: [1, 1, 0] }
         : kind === "skip"
           ? { x: fromX, y: 72, rotate: 0, scale: 0.96, opacity: 0 }
           : { x: fromX, y: fromY - 8, rotate: 0, scale: 0.94, opacity: 0 };
   const transition = reduceMotion
     ? { duration: 0 }
     : kind === "keep" || kind === "dispose"
-      ? { duration: FLY_DURATION, ease: EASE_OUT }
+      ? {
+          duration: FLY_DURATION,
+          ease: EASE_OUT,
+          opacity: { duration: FLY_DURATION, times: [0, 0.35, 1] },
+        }
       : { duration: 0.24, ease: EASE_OUT };
   const stampKind = kind === "keep" || kind === "dispose" ? kind : "neutral";
 

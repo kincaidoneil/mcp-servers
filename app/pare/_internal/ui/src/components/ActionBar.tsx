@@ -50,7 +50,7 @@ export function ActionBar({ config, canSkip, onAction, onSkip }: ActionBarProps)
       </button>
       {config.extra_actions.length > 0 && (
         <div className="pare-actions__extra">
-          {config.extra_actions.map((action) => (
+          {config.extra_actions.map((action, i) => (
             <button
               key={action.id}
               type="button"
@@ -61,7 +61,7 @@ export function ActionBar({ config, canSkip, onAction, onSkip }: ActionBarProps)
               data-testid={`action-${action.id}`}
             >
               {action.label}
-              {action.key && <kbd className="pare-kbd">{action.key.toUpperCase()}</kbd>}
+              <kbd className="pare-kbd">{i + 1}</kbd>
             </button>
           ))}
         </div>
@@ -79,12 +79,7 @@ export function Legend({ notes }: { notes: boolean }) {
       <span>
         <kbd className="pare-kbd">↑</kbd> expand
       </span>
-      {notes && (
-        <span>
-          <kbd className="pare-kbd">⌘←</kbd>
-          <kbd className="pare-kbd">⌘→</kbd> decide while typing
-        </span>
-      )}
+      {notes && <span>type to add a note</span>}
       <span>drag or swipe the card</span>
     </div>
   );

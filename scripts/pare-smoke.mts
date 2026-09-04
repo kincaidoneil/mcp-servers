@@ -1,33 +1,18 @@
-// HTTP smoke test for the pare bridge. Walks discovery, DCR, the consent
-// form, PKCE token exchange, and every tool over Streamable HTTP against a
-// running server, the way a real MCP client does. Stops at the first failure.
+// HTTP smoke test for the pare bridge. Talks Streamable HTTP to a running
+// server the way a real MCP client does: lists the tool, reads the app
+// resource, starts and reopens a session, and checks that no bearer token is
+// needed. Stops at the first failure.
 //
-//   PARE_ACCESS_CODE=<code> PARE_BASE_URL=http://localhost:3100 pnpm smoke:pare
+//   PARE_BASE_URL=http://localhost:3100 pnpm smoke:pare
 //
 // oxlint-disable no-console
 
-import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
 
 const base = (process.env["PARE_BASE_URL"] ?? "http://localhost:3100").replace(/\/$/, "");
-const accessCode = requireAccessCode();
-
-function requireAccessCode(): string {
-  const value = process.env["PARE_ACCESS_CODE"];
-  if (value) return value;
-  console.error("PARE_ACCESS_CODE is required (a code from the server's PARE_ACCESS_CODES).");
-  return process.exit(2);
-}
-
 const pare = `${base}/pare`;
-// http://localhost is the one non-https redirect DCR accepts.
-const redirectUri = "http://localhost:8765/callback";
-const clientState = `smoke-${randomBytes(6).toString("hex")}`;
-
-const verifier = randomBytes(48).toString("base64url");
-const challenge = createHash("sha256").update(verifier).digest("base64url");
 
 // ---- Reporting ---------------------------------------------------------------
 
@@ -49,56 +34,17 @@ async function step<T>(label: string, run: () => Promise<{ detail: string; value
   return value;
 }
 
-// ---- HTTP helpers ------------------------------------------------------------
+// ---- Tool call helpers -------------------------------------------------------
 
-async function readJson<T>(res: Response, schema: z.ZodType<T>, what: string): Promise<T> {
-  const text = await res.text();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    fail(`${what}: expected JSON, got ${res.status} ${text.slice(0, 200)}`);
-  }
-  const parsed = schema.safeParse(raw);
-  if (!parsed.success) fail(`${what}: unexpected shape\n${z.prettifyError(parsed.error)}`);
-  return parsed.data;
-}
+// Mirrors SESSION_ID_PATTERN in app/pare/_internal/schema.ts; node runs this
+// script without a bundler, so it cannot import that module.
+const SESSION_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{2,39}$/;
 
-function postForm(url: string, fields: Record<string, string>) {
-  return fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(fields).toString(),
-    redirect: "manual",
-  });
-}
-
-// ---- Schemas for what comes back --------------------------------------------
-
-const AsMetadata = z.object({
-  issuer: z.string(),
-  authorization_endpoint: z.string(),
-  token_endpoint: z.string(),
-  registration_endpoint: z.string(),
-  code_challenge_methods_supported: z.array(z.string()),
-});
-const ResourceMetadata = z.object({
-  resource: z.string(),
-  authorization_servers: z.array(z.string()),
-});
-const Registration = z.object({ client_id: z.string().min(1) });
-const Tokens = z.object({ access_token: z.string().min(1), token_type: z.literal("Bearer") });
-
-const Started = z.object({ session_id: z.string().min(1), total: z.number() });
-const Loaded = z.object({
-  session: z.object({ id: z.string(), version: z.number(), queue: z.array(z.string()) }),
-});
-const Recorded = z.object({ version: z.number(), decided: z.number(), status: z.string() });
-const Results = z.object({
+const Started = z.object({
+  session_id: z.string().regex(SESSION_ID_PATTERN),
+  total: z.number(),
   decided: z.number(),
-  decisions: z.array(z.object({ item_id: z.string(), note: z.string().optional() })),
 });
-const Sessions = z.object({ sessions: z.array(z.object({ id: z.string() })) });
 
 type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
 
@@ -127,153 +73,43 @@ async function callTool<T>(
   return { data: parsed.data, text: textOf(result) };
 }
 
+const smokeItems = [
+  { id: "s1", title: "First", subtitle: "smoke" },
+  { id: "s2", title: "Second", suggestion: { action: "dispose", reason: "unused" } },
+  { id: "s3", title: "Third" },
+];
+const smokeSession = {
+  title: "Smoke test",
+  keep: { label: "Keep" },
+  dispose: { label: "Drop" },
+  items: smokeItems,
+};
+
 // ---- The flow ---------------------------------------------------------------
 
 async function main() {
   console.log(`pare smoke against ${base}`);
 
-  await step("discovery", async () => {
-    const asRes = await fetch(`${base}/.well-known/oauth-authorization-server/pare`);
-    expect(asRes.status === 200, `AS metadata returned ${asRes.status}`);
-    const as = await readJson(asRes, AsMetadata, "AS metadata");
-    expect(as.issuer === pare, `issuer is ${as.issuer}, expected ${pare}`);
-    expect(
-      as.authorization_endpoint === `${pare}/oauth/authorize`,
-      `authorization_endpoint is ${as.authorization_endpoint}`,
-    );
-    expect(as.token_endpoint === `${pare}/oauth/token`, `token_endpoint is ${as.token_endpoint}`);
-    expect(
-      as.registration_endpoint === `${pare}/oauth/register`,
-      `registration_endpoint is ${as.registration_endpoint}`,
-    );
-    expect(as.code_challenge_methods_supported.includes("S256"), "S256 not advertised");
-
-    const prRes = await fetch(`${pare}/.well-known/oauth-protected-resource`);
-    expect(prRes.status === 200, `protected resource metadata returned ${prRes.status}`);
-    const pr = await readJson(prRes, ResourceMetadata, "protected resource metadata");
-    expect(pr.resource === pare, `resource is ${pr.resource}, expected ${pare}`);
-    expect(pr.authorization_servers.includes(pare), "authorization_servers lacks the bridge");
-    return { detail: `issuer ${as.issuer}`, value: undefined };
-  });
-
-  const clientId = await step("dynamic client registration", async () => {
-    const res = await fetch(`${pare}/oauth/register`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ client_name: "pare smoke", redirect_uris: [redirectUri] }),
-    });
-    expect(res.status === 201, `register returned ${res.status}`);
-    const { client_id } = await readJson(res, Registration, "registration");
-    return { detail: `client_id ${client_id.slice(0, 24)}...`, value: client_id };
-  });
-
-  const asState = await step("authorize page", async () => {
-    const url = new URL(`${pare}/oauth/authorize`);
-    url.searchParams.set("client_id", clientId);
-    url.searchParams.set("redirect_uri", redirectUri);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("code_challenge", challenge);
-    url.searchParams.set("code_challenge_method", "S256");
-    url.searchParams.set("state", clientState);
-    url.searchParams.set("scope", "mcp:read");
-    const res = await fetch(url, { redirect: "manual" });
-    expect(res.status === 200, `authorize returned ${res.status}`);
-    const html = await res.text();
-    const match = /<input[^>]*name="as_state"[^>]*value="([^"]+)"/.exec(html);
-    expect(match !== null, "no as_state input in the consent form");
-    const action = /<form[^>]*action="([^"]+)"/.exec(html)?.[1];
-    expect(action === `${pare}/oauth/submit`, `form posts to ${action ?? "(none)"}`);
-    return {
-      detail: `form posts to ${action}, as_state ${match[1]!.length} chars`,
-      value: match[1]!,
-    };
-  });
-
-  const code = await step("consent submit", async () => {
-    const good = await postForm(`${pare}/oauth/submit`, {
-      as_state: asState,
-      access_code: accessCode,
-    });
-    expect(good.status === 303, `correct code returned ${good.status}, expected 303`);
-    const location = good.headers.get("location");
-    expect(location !== null, "303 without a Location header");
-    const target = new URL(location);
-    expect(
-      target.origin + target.pathname === redirectUri,
-      `redirected to ${target.origin + target.pathname}, expected ${redirectUri}`,
-    );
-    expect(target.searchParams.get("state") === clientState, "state did not round-trip");
-    const authCode = target.searchParams.get("code");
-    expect(authCode !== null && authCode.length > 0, "no code in the redirect");
-
-    const bad = await postForm(`${pare}/oauth/submit`, {
-      as_state: asState,
-      access_code: `${accessCode}-wrong`,
-    });
-    expect(bad.status === 403, `wrong code returned ${bad.status}, expected 403`);
-    return { detail: "303 with code for the right code, 403 for a wrong one", value: authCode };
-  });
-
-  const accessToken = await step("token exchange", async () => {
-    const res = await postForm(`${pare}/oauth/token`, {
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: clientId,
-      code_verifier: verifier,
-    });
-    if (res.status !== 200) fail(`token returned ${res.status}: ${await res.text()}`);
-    const tokens = await readJson(res, Tokens, "token response");
-    return {
-      detail: `access_token ${tokens.access_token.length} chars`,
-      value: tokens.access_token,
-    };
-  });
-
   const client = new Client({ name: "pare-smoke", version: "0.0.0" });
-  const transport = new StreamableHTTPClientTransport(new URL(pare), {
-    requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
-  });
+  const transport = new StreamableHTTPClientTransport(new URL(pare));
 
   try {
     await step("mcp initialize + tools/list", async () => {
       await client.connect(transport);
       const { tools } = await client.listTools();
-      const byName = new Map(tools.map((t) => [t.name, t]));
-      const wanted = [
-        "pare-start",
-        "pare-resume",
-        "pare-get-results",
-        "pare-list-sessions",
-        "pare-load",
-        "pare-record",
-      ];
-      const missing = wanted.filter((name) => !byName.has(name));
-      expect(missing.length === 0, `missing tools: ${missing.join(", ")}`);
-      const Ui = z.object({
-        ui: z.object({
-          resourceUri: z.string().optional(),
-          visibility: z.array(z.string()).optional(),
-        }),
-      });
-      const uiOf = (name: string) => {
-        // oxlint-disable-next-line no-underscore-dangle
-        const parsed = Ui.safeParse(byName.get(name)?._meta);
-        return parsed.success ? parsed.data.ui : undefined;
-      };
       expect(
-        uiOf("pare-start")?.resourceUri === "ui://pare/app.html",
+        tools.length === 1 && tools[0]?.name === "pare-start",
+        `expected exactly pare-start, got ${tools.map((t) => t.name).join(", ") || "(none)"}`,
+      );
+      const Ui = z.object({ ui: z.object({ resourceUri: z.string() }) });
+      // oxlint-disable-next-line no-underscore-dangle
+      const meta = Ui.safeParse(tools[0]._meta);
+      expect(
+        meta.success && meta.data.ui.resourceUri === "ui://pare/app.html",
         "pare-start lacks _meta.ui.resourceUri",
       );
-      for (const name of ["pare-load", "pare-record"]) {
-        const visibility = uiOf(name)?.visibility;
-        expect(
-          visibility !== undefined && visibility.length === 1 && visibility[0] === "app",
-          `${name} visibility is ${JSON.stringify(visibility)}, expected ["app"]`,
-        );
-      }
       const serverName = client.getServerVersion()?.name;
-      return { detail: `server "${serverName}", ${tools.length} tools`, value: undefined };
+      return { detail: `server "${serverName}", 1 tool`, value: undefined };
     });
 
     await step("resources/read ui://pare/app.html", async () => {
@@ -291,97 +127,76 @@ async function main() {
       return { detail: `${item.mimeType}, ${kb} KB`, value: undefined };
     });
 
-    const sessionId = await step("pare-start", async () => {
+    const sessionId = await step("pare-start (new session)", async () => {
+      const { data, text } = await callTool(client, "pare-start", smokeSession, Started);
+      expect(data.total === 3, `total is ${data.total}`);
+      expect(data.decided === 0, `decided is ${data.decided}, expected 0`);
+      expect(text.includes(data.session_id), "text does not mention the session id");
+      return { detail: `session ${data.session_id}, ${data.total} items`, value: data.session_id };
+    });
+
+    await step("pare-start (reopen with a decision)", async () => {
       const { data } = await callTool(
         client,
         "pare-start",
         {
-          title: "Smoke test",
-          keep: { label: "Keep" },
-          dispose: { label: "Drop" },
-          items: [
-            { id: "s1", title: "First", subtitle: "smoke" },
-            { id: "s2", title: "Second", suggestion: { action: "dispose", reason: "unused" } },
-            { id: "s3", title: "Third" },
-          ],
+          ...smokeSession,
+          session_id: sessionId,
+          decisions: [{ item_id: "s2", action: "dispose", decided_at: new Date().toISOString() }],
         },
         Started,
       );
-      expect(data.total === 3, `total is ${data.total}`);
-      return { detail: `session ${data.session_id}, ${data.total} items`, value: data.session_id };
+      expect(data.session_id === sessionId, `reopened as ${data.session_id}, not ${sessionId}`);
+      expect(data.decided === 1, `decided is ${data.decided}, expected 1`);
+      return { detail: `same id, ${data.decided} of ${data.total} decided`, value: undefined };
     });
 
-    await step("pare-load", async () => {
-      const { data } = await callTool(client, "pare-load", { session_id: sessionId }, Loaded);
-      expect(data.session.id === sessionId, `loaded ${data.session.id}`);
-      expect(data.session.version === 0, `version is ${data.session.version}`);
-      expect(
-        data.session.queue.join(",") === "s1,s2,s3",
-        `queue is ${JSON.stringify(data.session.queue)}`,
-      );
-      return { detail: `queue ${data.session.queue.join(",")}`, value: undefined };
-    });
-
-    const note = "smoke note";
-    await step("pare-record", async () => {
-      const { data } = await callTool(
-        client,
-        "pare-record",
-        {
-          session_id: sessionId,
-          decisions: [
-            { item_id: "s2", action: "dispose", note, decided_at: new Date().toISOString() },
+    await step("pare-start (duplicate item id)", async () => {
+      const result = await client.callTool({
+        name: "pare-start",
+        arguments: {
+          title: "Dupes",
+          items: [
+            { id: "a", title: "One" },
+            { id: "a", title: "Two" },
           ],
         },
-        Recorded,
-      );
-      expect(data.version === 1, `version is ${data.version}, expected 1`);
-      expect(data.decided === 1, `decided is ${data.decided}, expected 1`);
-      return { detail: `version ${data.version}, ${data.decided} decided`, value: undefined };
-    });
-
-    await step("pare-get-results", async () => {
-      const { data, text } = await callTool(
-        client,
-        "pare-get-results",
-        { session_id: sessionId },
-        Results,
-      );
-      expect(data.decided === 1, `decided is ${data.decided}`);
-      expect(data.decisions[0]?.note === note, "note missing from structuredContent");
-      expect(text.includes(note), `note missing from text:\n${text}`);
-      expect(text.includes("Drop (1)"), `dispose label missing from text:\n${text}`);
-      return { detail: text.split("\n")[0] ?? "", value: undefined };
-    });
-
-    await step("pare-list-sessions", async () => {
-      const { data } = await callTool(client, "pare-list-sessions", {}, Sessions);
-      expect(
-        data.sessions.some((s) => s.id === sessionId),
-        `session ${sessionId} not in the list`,
-      );
-      return {
-        detail: `${data.sessions.length} session(s), includes ${sessionId}`,
-        value: undefined,
-      };
+      });
+      expect(result.isError === true, "duplicate item ids were accepted");
+      const text = textOf(result);
+      expect(/duplicate/i.test(text), `error does not mention duplicate:\n${text}`);
+      const line =
+        text
+          .split("\n")
+          .find((l) => /duplicate/i.test(l))
+          ?.trim() ?? "";
+      return { detail: line, value: undefined };
     });
   } finally {
     await client.close().catch(() => undefined);
   }
 
-  await step("unauthenticated tools/list", async () => {
+  await step("unauthenticated POST /pare", async () => {
     const res = await fetch(pare, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
       },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "pare-smoke-raw", version: "0.0.0" },
+        },
+      }),
     });
-    expect(res.status === 401, `returned ${res.status}, expected 401`);
-    const www = res.headers.get("www-authenticate");
-    expect(www !== null && www.length > 0, "401 without WWW-Authenticate");
-    return { detail: `401, WWW-Authenticate: ${www}`, value: undefined };
+    expect(res.status === 200 || res.status === 202, `returned ${res.status}, expected 200/202`);
+    await res.body?.cancel();
+    return { detail: `${res.status} with no bearer token`, value: undefined };
   });
 
   console.log("all steps passed");

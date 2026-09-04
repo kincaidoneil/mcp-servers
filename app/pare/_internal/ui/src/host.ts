@@ -1,68 +1,31 @@
 // Everything the app asks of the MCP host, behind one interface so the UI
-// never touches the `App` protocol object directly and the harness can be
-// swapped in for tests.
+// never touches the `App` protocol object directly.
 
 import type { App, McpUiDisplayMode, McpUiHostContext } from "@modelcontextprotocol/ext-apps";
-import type { z } from "zod";
-import {
-  LoadResultSchema,
-  RecordResultSchema,
-  type RecordInput,
-  type RecordResult,
-  type Session,
-} from "../../schema";
 
 export type HostResult<T> = { ok: true; value: T } | { ok: false; message: string };
 
 export interface HostBridge {
-  loadSession(sessionId: string): Promise<HostResult<Session>>;
-  record(input: RecordInput): Promise<HostResult<RecordResult>>;
+  // Posts as the user and triggers a reply.
   sendMessage(text: string): Promise<HostResult<void>>;
-  // Best effort: hosts without the capability are skipped silently.
-  updateModelContext(text: string, structured?: Record<string, unknown>): Promise<void>;
+  // Quiet: replaces the previous update, read on the model's next turn. Hosts
+  // without the capability are skipped silently.
+  updateModelContext(text: string, structured: Record<string, unknown>): Promise<void>;
   openLink(url: string): Promise<void>;
   requestDisplayMode(mode: McpUiDisplayMode): Promise<McpUiDisplayMode>;
   context(): McpUiHostContext | undefined;
   canSendMessage(): boolean;
-  canOpenLinks(): boolean;
   availableDisplayModes(): McpUiDisplayMode[];
 }
 
 export function createHostBridge(app: App): HostBridge {
-  const hasCapability = (key: "message" | "updateModelContext" | "openLinks") =>
-    app.getHostCapabilities()?.[key] !== undefined;
-
-  async function callTool<T>(
-    name: string,
-    args: Record<string, unknown>,
-    schema: z.ZodType<T>,
-  ): Promise<HostResult<T>> {
-    let result;
-    try {
-      result = await app.callServerTool({ name, arguments: args });
-    } catch (error) {
-      return { ok: false, message: `${name} failed: ${describe(error)}` };
-    }
-    if (result.isError) {
-      return { ok: false, message: textOf(result.content) || `${name} returned an error` };
-    }
-    const parsed = schema.safeParse(result.structuredContent);
-    if (!parsed.success) {
-      return { ok: false, message: `${name} returned an unexpected shape` };
-    }
-    return { ok: true, value: parsed.data };
-  }
+  const capabilities = () => app.getHostCapabilities();
+  const supportsStructured = () =>
+    capabilities()?.updateModelContext?.structuredContent !== undefined;
 
   return {
-    async loadSession(sessionId) {
-      const result = await callTool("pare-load", { session_id: sessionId }, LoadResultSchema);
-      return result.ok ? { ok: true, value: result.value.session } : result;
-    },
-    record(input) {
-      return callTool("pare-record", input, RecordResultSchema);
-    },
     async sendMessage(text) {
-      if (!hasCapability("message")) {
+      if (capabilities()?.message === undefined) {
         return { ok: false, message: "This host cannot receive messages from apps." };
       }
       try {
@@ -75,18 +38,18 @@ export function createHostBridge(app: App): HostBridge {
       }
     },
     async updateModelContext(text, structured) {
-      if (!hasCapability("updateModelContext")) return;
+      if (capabilities()?.updateModelContext === undefined) return;
       try {
         await app.updateModelContext({
           content: [{ type: "text", text }],
-          ...(structured ? { structuredContent: structured } : {}),
+          ...(supportsStructured() ? { structuredContent: structured } : {}),
         });
       } catch {
-        // Context updates are advisory; the results tools remain the source of truth.
+        // Advisory. The final message carries everything anyway.
       }
     },
     async openLink(url) {
-      if (!hasCapability("openLinks")) {
+      if (capabilities()?.openLinks === undefined) {
         window.open(url, "_blank", "noopener,noreferrer");
         return;
       }
@@ -101,17 +64,9 @@ export function createHostBridge(app: App): HostBridge {
       }
     },
     context: () => app.getHostContext(),
-    canSendMessage: () => hasCapability("message"),
-    canOpenLinks: () => hasCapability("openLinks"),
+    canSendMessage: () => capabilities()?.message !== undefined,
     availableDisplayModes: () => app.getHostContext()?.availableDisplayModes ?? ["inline"],
   };
-}
-
-function textOf(content: { type: string; text?: string }[] | undefined): string {
-  return (content ?? [])
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
-    .join("\n");
 }
 
 function describe(error: unknown): string {

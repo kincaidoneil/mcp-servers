@@ -11,6 +11,7 @@ interface CardProps {
   expanded: boolean;
   onToggleExpanded?: () => void;
   onOpenLink?: (url: string) => void;
+  onOverflow?: (overflows: boolean) => void;
   children?: ReactNode;
 }
 
@@ -20,6 +21,7 @@ export function Card({
   expanded,
   onToggleExpanded,
   onOpenLink,
+  onOverflow,
   children,
 }: CardProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -28,11 +30,16 @@ export function Card({
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
-    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 2);
+    const measure = () => {
+      const value = el.scrollHeight > el.clientHeight + 2;
+      setOverflows(value);
+      onOverflow?.(value);
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item.id, expanded]);
 
   const paragraphs = (item.body ?? "")

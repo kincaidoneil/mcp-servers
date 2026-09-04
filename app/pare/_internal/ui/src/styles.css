@@ -309,9 +309,10 @@ a {
   height: var(--stage-h-expanded);
 }
 
+/* Gutters keep a dragged card inside the iframe until it has faded. */
 .pare-card {
   position: absolute;
-  inset: 0;
+  inset: 0 28px;
   margin: 0 auto;
   width: 100%;
   border-radius: var(--radius);
@@ -343,7 +344,7 @@ a {
 
 .pare-card--ghost {
   pointer-events: none;
-  z-index: 5;
+  z-index: 20;
 }
 
 .pare-card__head {
@@ -597,6 +598,24 @@ a {
   outline: none;
   border-color: var(--ink-3);
   box-shadow: 0 0 0 3px var(--focus);
+}
+
+@media (max-width: 480px) {
+  .pare-note__hint {
+    display: none;
+  }
+}
+
+.pare-note-open {
+  align-self: center;
+  font-size: 12px;
+  color: var(--ink-3);
+  border-bottom: 1px dashed var(--line-2);
+  padding: 0 2px 1px;
+}
+
+.pare-note-open:hover {
+  color: var(--ink);
 }
 
 .pare-note__hint {
