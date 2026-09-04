@@ -1,13 +1,22 @@
-// The deck. Owns every bit of motion: pointer drag, two-finger trackpad
-// swipes, keyboard-triggered exits, and the card that slides back in after
-// an undo. It reports how far the card has been pulled toward either side in
-// `pull`, which drives the table's glow and the side labels.
+// The deck. A mouse drag moves the top card directly, since a pointer reports
+// its own release. A trackpad never reports the fingers lifting, so the deck
+// sits in a native scroller with three snap points, left, centre and right:
+// the browser owns the gesture, holds the card wherever the fingers are, and
+// only lands on a side once the fingers actually lift. Landing there is the
+// decision.
 //
-// Decisions are committed the moment a gesture is done. The leaving card
-// becomes a detached "ghost" that finishes its flight while the next card is
-// already live, so a fast run of keypresses never waits on an animation.
+// A leaving card becomes a detached "ghost" that finishes its flight while
+// the next card is already live, so a fast run of keypresses never waits on
+// an animation.
 
-import { useEffect, useLayoutEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import {
   animate,
   motion,
@@ -50,21 +59,22 @@ const VISIBLE_BEHIND = 2;
 const EASE_OUT = [0.2, 0, 0, 1] as const;
 const SPRING = { type: "spring", stiffness: 520, damping: 42, mass: 0.9 } as const;
 const SETTLE = { type: "spring", stiffness: 420, damping: 38 } as const;
-// The live card's tilt, so a leaving card can start at exactly the angle it
-// had when the gesture ended.
+// The live card's tilt, so a leaving card starts at the angle it ended on.
 const ROTATE_PER_PX = 9 / 320;
-// A trackpad has no release event, so a swipe has to be far enough that it
-// can only be deliberate. A mouse drag, which does have a release, commits
-// much earlier.
-const WHEEL_COMMIT_MIN = 190;
-const WHEEL_COMMIT_MAX = 280;
+// How far the scroller travels to either side. The browser lands on whichever
+// snap point is nearest when the gesture ends, so half of this is the distance
+// a swipe has to cover to decide.
+export const THROW = 260;
 
 export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStackProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const reduceMotion = useReducedMotion() ?? false;
   const x = useMotionValue(0);
   const y = useMotionValue(0);
   const opacity = useMotionValue(1);
+  // How far the scroller has carried the card, in the same units as `x`.
+  const scrolled = useMotionValue(0);
   const [ghosts, setGhosts] = useState<Ghost[]>([]);
   const [dragging, setDragging] = useState(false);
   const ghostSeq = useRef(0);
@@ -74,30 +84,44 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   const stageWidth = () => stageRef.current?.clientWidth ?? 480;
   const commitDistance = () => Math.min(140, stageWidth() * 0.34);
-  const wheelCommitDistance = () =>
-    Math.max(WHEEL_COMMIT_MIN, Math.min(WHEEL_COMMIT_MAX, stageWidth() * 0.5));
   const flyDistance = () => stageWidth() * 0.75;
 
   const latest = useRef({ items, onSwipe });
   latest.current = { items, onSwipe };
 
-  const rotate = useTransform(x, (value) => value * ROTATE_PER_PX);
-  // The card only starts to thin near the end of a long push, so it stays
-  // solid while the gesture is still being made.
-  const dragFade = useTransform(x, [-320, -190, 0, 190, 320], [0.35, 1, 1, 1, 0.35]);
+  const travel = useTransform(() => x.get() + scrolled.get());
+  const rotate = useTransform(travel, (value) => value * ROTATE_PER_PX);
+  // The card stays solid through the gesture and thins over the last stretch,
+  // so it is nearly gone by the time it reaches the panel's edge.
+  const dragFade = useTransform(travel, [-260, -150, 0, 150, 260], [0.12, 1, 1, 1, 0.12]);
   const topOpacity = useTransform(() => dragFade.get() * opacity.get());
 
-  // The glow follows the card's travel, easing in late so a small nudge shows
-  // almost nothing and the light arrives as the card nears the line.
-  function applyPull(travel: number, distance = commitDistance()) {
-    const ratio = Math.max(-1, Math.min(1, travel / distance));
-    pull.set(Math.sign(ratio) * Math.abs(ratio) ** 2.2);
-  }
+  // The glow follows the card, easing in late so a small nudge shows almost
+  // nothing and the light arrives as the card nears the decision.
+  const applyPull = useCallback(
+    (offset: number, distance: number) => {
+      const ratio = Math.max(-1, Math.min(1, offset / distance));
+      pull.set(Math.sign(ratio) * Math.abs(ratio) ** 2.2);
+    },
+    [pull],
+  );
 
-  function releasePull() {
+  const releasePull = useCallback(() => {
     if (reduceMotion) pull.set(0);
     else animate(pull, 0, { duration: 0.3, ease: EASE_OUT });
-  }
+  }, [pull, reduceMotion]);
+
+  // Put the scroller back at its centre without the browser animating there.
+  const recentre = useCallback(() => {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.style.scrollSnapType = "none";
+    el.scrollLeft = THROW;
+    scrolled.set(0);
+    requestAnimationFrame(() => {
+      el.style.scrollSnapType = "";
+    });
+  }, [scrolled]);
 
   function launchGhost(itemId: string, kind: ExitKind, velocity = 0) {
     const item = latest.current.items.find((i) => i.id === itemId);
@@ -110,16 +134,18 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
         key: ++ghostSeq.current,
         item,
         kind,
-        fromX: isTop ? x.get() : 0,
+        // The ghost starts exactly where the card was, however it got there.
+        fromX: isTop ? travel.get() : 0,
         fromY: isTop ? y.get() : 0,
         fromOpacity: isTop ? dragFade.get() : 1,
         fromVx: isTop ? velocity : 0,
       },
     ]);
-    if (isTop) {
-      x.jump(0);
-      y.jump(0);
-    }
+    // `x` is not reset here: the outgoing card keeps its position for the
+    // frame it is still on screen, and the layout effect below zeroes it as
+    // the next card mounts. Resetting now makes the card jump to centre for
+    // one frame before the ghost appears.
+    if (isTop) recentre();
     releasePull();
   }
 
@@ -144,7 +170,8 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     animate(y, 0, SPRING);
   }
 
-  // A card returning after undo slides in from where it left.
+  // The next card starts centred, and a card returning after undo slides in
+  // from where it left.
   useLayoutEffect(() => {
     if (!topId) return;
     const kind = lastExit.current.get(topId);
@@ -165,73 +192,41 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topId]);
 
-  // A trackpad sends wheel events and never says when the fingers lift, so no
-  // timer can tell a pause from a release. Instead the card only leaves once
-  // it has been pushed a long way, which is unambiguous, and it leaves the
-  // moment that line is crossed. Stopping short springs it back.
+  // Start centred, and follow the scroller. A swipe decides only when the
+  // browser has finished the gesture and landed on a side, which is after the
+  // fingers lift: `scrollend` fires past the momentum and the snap. Where it
+  // is unsupported, a pause counts only at a snap point, so holding the card
+  // part way still decides nothing.
   useEffect(() => {
-    const el = stageRef.current;
+    const el = scrollerRef.current;
     if (!el) return;
-    let axis: "x" | "y" | null = null;
+    el.scrollLeft = THROW;
     let idle: ReturnType<typeof setTimeout> | undefined;
-    let cooldownUntil = 0;
-    let travel = 0;
-    let lastAt = 0;
-    let velocity = 0;
+    const hasScrollEnd = "onscrollend" in window;
 
-    const reset = () => {
-      axis = null;
-      travel = 0;
-      velocity = 0;
-    };
-
-    const onWheel = (event: WheelEvent) => {
-      if (!latest.current.items[0]) return;
-      const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
-      const dx = event.deltaX * scale;
-      const dy = event.deltaY * scale;
-      const now = performance.now();
-      if (now < cooldownUntil) {
-        if (Math.abs(dx) > Math.abs(dy)) event.preventDefault();
+    const landed = () => {
+      const offset = THROW - el.scrollLeft;
+      if (Math.abs(offset) < THROW - 1) return;
+      if (!latest.current.items[0]) {
+        recentre();
         return;
       }
-      if (axis === null) {
-        if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
-        axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
-        lastAt = now;
-      }
+      commitSwipe(offset > 0 ? 1 : -1);
+    };
+
+    const onScroll = () => {
+      scrolled.set(THROW - el.scrollLeft);
+      applyPull(THROW - el.scrollLeft, THROW);
+      if (hasScrollEnd) return;
       if (idle) clearTimeout(idle);
-      if (axis === "y") {
-        idle = setTimeout(reset, 160);
-        return;
-      }
-      event.preventDefault();
-      // Natural scrolling: fingers moving right report a negative deltaX.
-      const step = -dx;
-      const gap = Math.max(1, now - lastAt);
-      lastAt = now;
-      velocity = (step / gap) * 1000;
-      const limit = wheelCommitDistance();
-      travel = Math.max(-limit, Math.min(limit, travel + step));
-      x.set(travel);
-      applyPull(travel, limit);
-      if (Math.abs(travel) >= limit) {
-        const direction = travel > 0 ? 1 : -1;
-        commitSwipe(direction, velocity);
-        reset();
-        // Swallow the momentum that keeps arriving after the fingers lift.
-        cooldownUntil = performance.now() + 500;
-        return;
-      }
-      idle = setTimeout(() => {
-        reset();
-        settleBack();
-      }, 220);
+      idle = setTimeout(landed, 120);
     };
 
-    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("scroll", onScroll, { passive: true });
+    if (hasScrollEnd) el.addEventListener("scrollend", landed);
     return () => {
-      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("scroll", onScroll);
+      if (hasScrollEnd) el.removeEventListener("scrollend", landed);
       if (idle) clearTimeout(idle);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -290,7 +285,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     d.lastT = now;
     x.set(dx);
     y.set(dy * 0.22);
-    applyPull(dx);
+    applyPull(dx, commitDistance());
   }
 
   function endDrag(event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) {
@@ -319,44 +314,50 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   return (
     <div ref={stageRef} className="pare-stage">
-      {behind.toReversed().map((item, i) => {
-        const depth = behind.length - i;
-        return (
-          <motion.div
-            key={item.id}
-            className="pare-card pare-card--behind"
-            initial={false}
-            animate={{ scale: 1 - depth * 0.03, y: depth * 6 }}
-            transition={reduceMotion ? { duration: 0 } : SETTLE}
-            style={{ zIndex: 10 - depth }}
-            aria-hidden
-          >
-            <Card item={item} />
-          </motion.div>
-        );
-      })}
+      <div ref={scrollerRef} className="pare-scroller" data-testid="scroller">
+        <div className="pare-throw" style={{ width: THROW }} aria-hidden />
+        <div className="pare-frame">
+          {behind.toReversed().map((item, i) => {
+            const depth = behind.length - i;
+            return (
+              <motion.div
+                key={item.id}
+                className="pare-card pare-card--behind"
+                initial={false}
+                animate={{ scale: 1 - depth * 0.03, y: depth * 6 }}
+                transition={reduceMotion ? { duration: 0 } : SETTLE}
+                style={{ zIndex: 10 - depth }}
+                aria-hidden
+              >
+                <Card item={item} />
+              </motion.div>
+            );
+          })}
 
-      {top && (
-        <motion.div
-          key={top.id}
-          className={"pare-card pare-card--top" + (dragging ? " is-dragging" : "")}
-          style={{ x, y, rotate, opacity: topOpacity }}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={(e) => endDrag(e, false)}
-          onPointerCancel={(e) => endDrag(e, true)}
-          onClickCapture={(e) => {
-            if (performance.now() < suppressClickUntil.current) {
-              e.stopPropagation();
-              e.preventDefault();
-            }
-          }}
-          data-testid="top-card"
-          data-item-id={top.id}
-        >
-          <Card item={top} onOpenLink={onOpenLink} />
-        </motion.div>
-      )}
+          {top && (
+            <motion.div
+              key={top.id}
+              className={"pare-card pare-card--top" + (dragging ? " is-dragging" : "")}
+              style={{ x, y, rotate, opacity: topOpacity }}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={(e) => endDrag(e, false)}
+              onPointerCancel={(e) => endDrag(e, true)}
+              onClickCapture={(e) => {
+                if (performance.now() < suppressClickUntil.current) {
+                  e.stopPropagation();
+                  e.preventDefault();
+                }
+              }}
+              data-testid="top-card"
+              data-item-id={top.id}
+            >
+              <Card item={top} onOpenLink={onOpenLink} />
+            </motion.div>
+          )}
+        </div>
+        <div className="pare-throw" style={{ width: THROW }} aria-hidden />
+      </div>
 
       {ghosts.map((ghost) => (
         <GhostCard

@@ -92,16 +92,19 @@ test("mouse drag and trackpad wheel commit past the threshold and settle back be
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
   await expect(inContext(page, "nl-1")).toHaveAttribute("data-action", "keep");
 
-  // Two-finger swipe left on a trackpad arrives as positive deltaX. A
-  // trackpad never reports the fingers lifting, so a swipe has to travel far
-  // enough to be deliberate: a partial push and a pull back decide nothing.
+  // A trackpad swipe is a native scroll between three snap points, so partial
+  // movement decides nothing however long it is held.
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 5; i++) await page.mouse.wheel(30, 0);
-  for (let i = 0; i < 5; i++) await page.mouse.wheel(-30, 0);
-  await page.waitForTimeout(400);
+  for (let i = 0; i < 2; i++) await page.mouse.wheel(30, 0);
+  await page.waitForTimeout(500);
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
-  // Pushing the whole way commits as the line is crossed.
-  for (let i = 0; i < 12; i++) await page.mouse.wheel(30, 0);
+
+  // Landing on a side is the decision, and the browser only lands there once
+  // the gesture is over. Scrolling to the end stands in for that here.
+  await app.getByTestId("scroller").evaluate((el) => {
+    el.scrollLeft = el.scrollWidth;
+    el.dispatchEvent(new Event("scrollend"));
+  });
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-3");
   await expect(inContext(page, "nl-2")).toHaveAttribute("data-action", "dispose");
 
@@ -118,8 +121,12 @@ test("mouse drag and trackpad wheel commit past the threshold and settle back be
   await page.mouse.up();
   const ghost = app.locator(".pare-card--ghost").first();
   await expect(ghost).toBeVisible();
-  const z = await ghost.evaluate((el) => getComputedStyle(el).zIndex);
-  expect(Number(z)).toBeGreaterThan(10);
+  // The leaving card flies over the deck, not under it.
+  const ghostZ = await ghost.evaluate((el) => Number(getComputedStyle(el).zIndex));
+  const deckZ = await app
+    .getByTestId("scroller")
+    .evaluate((el) => Number(getComputedStyle(el).zIndex));
+  expect(ghostZ).toBeGreaterThan(deckZ);
   await expect(ghost).toHaveCount(0, { timeout: 3000 });
 });
 
