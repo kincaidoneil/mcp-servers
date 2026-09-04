@@ -92,15 +92,16 @@ test("mouse drag and trackpad wheel commit past the threshold and settle back be
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
   await expect(inContext(page, "nl-1")).toHaveAttribute("data-action", "keep");
 
-  // Two-finger swipe left on a trackpad arrives as positive deltaX. Crossing
-  // the line is not enough: pulling back before the fingers lift cancels.
+  // Two-finger swipe left on a trackpad arrives as positive deltaX. A
+  // trackpad never reports the fingers lifting, so a swipe has to travel far
+  // enough to be deliberate: a partial push and a pull back decide nothing.
   await page.mouse.move(cx, cy);
-  for (let i = 0; i < 10; i++) await page.mouse.wheel(30, 0);
-  for (let i = 0; i < 10; i++) await page.mouse.wheel(-30, 0);
+  for (let i = 0; i < 5; i++) await page.mouse.wheel(30, 0);
+  for (let i = 0; i < 5; i++) await page.mouse.wheel(-30, 0);
   await page.waitForTimeout(400);
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
-  // Lifting past the line commits.
-  for (let i = 0; i < 10; i++) await page.mouse.wheel(30, 0);
+  // Pushing the whole way commits as the line is crossed.
+  for (let i = 0; i < 12; i++) await page.mouse.wheel(30, 0);
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-3");
   await expect(inContext(page, "nl-2")).toHaveAttribute("data-action", "dispose");
 

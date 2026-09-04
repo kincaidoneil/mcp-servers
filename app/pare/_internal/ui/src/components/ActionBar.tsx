@@ -40,7 +40,7 @@ export function SideAction({ kind, config, suggested, pull, onAction }: SideActi
           {kind === "keep" ? "→" : "←"}
         </span>
         <span className="pare-side__label">{action.label}</span>
-        {suggested && <Suggested />}
+        <span className="pare-side__slot">{suggested && <Suggested />}</span>
       </motion.button>
     </div>
   );

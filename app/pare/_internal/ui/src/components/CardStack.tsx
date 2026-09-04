@@ -42,13 +42,22 @@ interface Ghost {
   fromX: number;
   fromY: number;
   fromOpacity: number;
+  // Horizontal speed at release, so the exit continues the gesture.
+  fromVx: number;
 }
 
 const VISIBLE_BEHIND = 2;
-const FLY_DURATION = 0.34;
 const EASE_OUT = [0.2, 0, 0, 1] as const;
 const SPRING = { type: "spring", stiffness: 520, damping: 42, mass: 0.9 } as const;
 const SETTLE = { type: "spring", stiffness: 420, damping: 38 } as const;
+// The live card's tilt, so a leaving card can start at exactly the angle it
+// had when the gesture ended.
+const ROTATE_PER_PX = 9 / 320;
+// A trackpad has no release event, so a swipe has to be far enough that it
+// can only be deliberate. A mouse drag, which does have a release, commits
+// much earlier.
+const WHEEL_COMMIT_MIN = 190;
+const WHEEL_COMMIT_MAX = 280;
 
 export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStackProps) {
   const stageRef = useRef<HTMLDivElement>(null);
@@ -65,21 +74,23 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   const stageWidth = () => stageRef.current?.clientWidth ?? 480;
   const commitDistance = () => Math.min(140, stageWidth() * 0.34);
+  const wheelCommitDistance = () =>
+    Math.max(WHEEL_COMMIT_MIN, Math.min(WHEEL_COMMIT_MAX, stageWidth() * 0.5));
   const flyDistance = () => stageWidth() * 0.75;
 
   const latest = useRef({ items, onSwipe });
   latest.current = { items, onSwipe };
 
-  const rotate = useTransform(x, [-320, 320], [-9, 9]);
-  // The card thins a little as it is pushed and never reaches the iframe
-  // edge opaque.
-  const dragFade = useTransform(x, [-260, -60, 0, 60, 260], [0.2, 1, 1, 1, 0.2]);
+  const rotate = useTransform(x, (value) => value * ROTATE_PER_PX);
+  // The card only starts to thin near the end of a long push, so it stays
+  // solid while the gesture is still being made.
+  const dragFade = useTransform(x, [-320, -190, 0, 190, 320], [0.35, 1, 1, 1, 0.35]);
   const topOpacity = useTransform(() => dragFade.get() * opacity.get());
 
   // The glow follows the card's travel, easing in late so a small nudge shows
   // almost nothing and the light arrives as the card nears the line.
-  function applyPull(travel: number) {
-    const ratio = Math.max(-1, Math.min(1, travel / commitDistance()));
+  function applyPull(travel: number, distance = commitDistance()) {
+    const ratio = Math.max(-1, Math.min(1, travel / distance));
     pull.set(Math.sign(ratio) * Math.abs(ratio) ** 2.2);
   }
 
@@ -88,7 +99,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     else animate(pull, 0, { duration: 0.3, ease: EASE_OUT });
   }
 
-  function launchGhost(itemId: string, kind: ExitKind) {
+  function launchGhost(itemId: string, kind: ExitKind, velocity = 0) {
     const item = latest.current.items.find((i) => i.id === itemId);
     if (!item) return;
     const isTop = latest.current.items[0]?.id === itemId;
@@ -102,6 +113,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
         fromX: isTop ? x.get() : 0,
         fromY: isTop ? y.get() : 0,
         fromOpacity: isTop ? dragFade.get() : 1,
+        fromVx: isTop ? velocity : 0,
       },
     ]);
     if (isTop) {
@@ -113,11 +125,11 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   apiRef.current = { exit: launchGhost };
 
-  function commitSwipe(direction: 1 | -1) {
+  function commitSwipe(direction: 1 | -1, velocity = 0) {
     const item = latest.current.items[0];
     if (!item) return;
     const action = direction > 0 ? KEEP : DISPOSE;
-    launchGhost(item.id, action);
+    launchGhost(item.id, action, velocity);
     latest.current.onSwipe(item.id, action);
   }
 
@@ -153,28 +165,24 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topId]);
 
-  // Two-finger trackpad swipes arrive as wheel events with no end event, and
-  // momentum keeps firing after the fingers lift. Past the line the swipe
-  // commits as soon as that momentum starts dying, which lands close to the
-  // moment of release; pulling back before then cancels.
+  // A trackpad sends wheel events and never says when the fingers lift, so no
+  // timer can tell a pause from a release. Instead the card only leaves once
+  // it has been pushed a long way, which is unambiguous, and it leaves the
+  // moment that line is crossed. Stopping short springs it back.
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     let axis: "x" | "y" | null = null;
     let idle: ReturnType<typeof setTimeout> | undefined;
     let cooldownUntil = 0;
-    let peak = 0;
+    let travel = 0;
+    let lastAt = 0;
+    let velocity = 0;
 
-    const finish = () => {
+    const reset = () => {
       axis = null;
-      peak = 0;
-      const settled = x.get();
-      if (Math.abs(settled) >= commitDistance()) {
-        commitSwipe(settled > 0 ? 1 : -1);
-        cooldownUntil = performance.now() + 400;
-      } else {
-        settleBack();
-      }
+      travel = 0;
+      velocity = 0;
     };
 
     const onWheel = (event: WheelEvent) => {
@@ -190,28 +198,35 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
       if (axis === null) {
         if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
         axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+        lastAt = now;
       }
       if (idle) clearTimeout(idle);
       if (axis === "y") {
-        idle = setTimeout(() => (axis = null), 160);
+        idle = setTimeout(reset, 160);
         return;
       }
       event.preventDefault();
       // Natural scrolling: fingers moving right report a negative deltaX.
-      // Travel is clamped so momentum cannot overshoot the line.
-      const limit = commitDistance() + 40;
-      const next = Math.max(-limit, Math.min(limit, x.get() - dx));
-      x.set(next);
-      applyPull(next);
-      const speed = Math.abs(dx);
-      peak = Math.max(peak, speed);
-      if (Math.abs(next) >= commitDistance() && speed <= Math.max(2, peak * 0.35)) {
-        finish();
+      const step = -dx;
+      const gap = Math.max(1, now - lastAt);
+      lastAt = now;
+      velocity = (step / gap) * 1000;
+      const limit = wheelCommitDistance();
+      travel = Math.max(-limit, Math.min(limit, travel + step));
+      x.set(travel);
+      applyPull(travel, limit);
+      if (Math.abs(travel) >= limit) {
+        const direction = travel > 0 ? 1 : -1;
+        commitSwipe(direction, velocity);
+        reset();
+        // Swallow the momentum that keeps arriving after the fingers lift.
+        cooldownUntil = performance.now() + 500;
         return;
       }
-      // A longer gap than this is a pause, not the space between two frames
-      // of one gesture; momentum decay above is what usually ends a swipe.
-      idle = setTimeout(finish, 120);
+      idle = setTimeout(() => {
+        reset();
+        settleBack();
+      }, 220);
     };
 
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -294,7 +309,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     const flung =
       Math.abs(d.vx) > 700 && Math.sign(d.vx) === Math.sign(current) && Math.abs(current) > 90;
     if (!cancelled && (Math.abs(current) >= commitDistance() || flung)) {
-      commitSwipe(current > 0 ? 1 : -1);
+      commitSwipe(current > 0 ? 1 : -1, d.vx);
     } else {
       settleBack();
     }
@@ -367,25 +382,37 @@ function GhostCard({
   reduceMotion: boolean;
   onDone: () => void;
 }) {
-  const { kind, fromX, fromY, fromOpacity } = ghost;
-  const target =
-    kind === "keep"
-      ? { x: flyDistance, y: fromY + 20, rotate: 10, opacity: 0 }
-      : kind === "dispose"
-        ? { x: -flyDistance, y: fromY + 20, rotate: -10, opacity: 0 }
-        : kind === "skip"
-          ? { x: fromX, y: 64, rotate: 0, scale: 0.96, opacity: 0 }
-          : { x: fromX, y: fromY - 8, rotate: 0, scale: 0.94, opacity: 0 };
+  const { kind, fromX, fromY, fromOpacity, fromVx } = ghost;
+  const flying = kind === "keep" || kind === "dispose";
+  const direction = kind === "keep" ? 1 : -1;
+  const target = flying
+    ? { x: direction * flyDistance, y: fromY + 18, rotate: direction * 13, opacity: 0 }
+    : kind === "skip"
+      ? { x: fromX, y: 64, rotate: 0, scale: 0.96, opacity: 0 }
+      : { x: fromX, y: fromY - 8, rotate: 0, scale: 0.94, opacity: 0 };
+  // The card leaves at the speed it was released with, so the flight reads as
+  // one motion with the gesture rather than a new animation.
   const transition = reduceMotion
     ? { duration: 0 }
-    : kind === "keep" || kind === "dispose"
-      ? { duration: FLY_DURATION, ease: EASE_OUT, opacity: { duration: FLY_DURATION * 0.8 } }
+    : flying
+      ? {
+          x: { type: "spring", stiffness: 140, damping: 24, mass: 0.9, velocity: fromVx },
+          y: { duration: 0.34, ease: EASE_OUT },
+          rotate: { duration: 0.34, ease: EASE_OUT },
+          opacity: { duration: 0.3, ease: EASE_OUT },
+        }
       : { duration: 0.24, ease: EASE_OUT };
 
   return (
     <motion.div
       className="pare-card pare-card--ghost"
-      initial={{ x: fromX, y: fromY, rotate: fromX / 32, opacity: fromOpacity, scale: 1 }}
+      initial={{
+        x: fromX,
+        y: fromY,
+        rotate: fromX * ROTATE_PER_PX,
+        opacity: fromOpacity,
+        scale: 1,
+      }}
       animate={target}
       transition={transition}
       onAnimationComplete={onDone}

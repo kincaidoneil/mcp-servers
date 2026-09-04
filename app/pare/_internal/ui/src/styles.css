@@ -174,12 +174,18 @@ a {
   z-index: 15;
 }
 
+/* Fixed rows: arrow, label, sparkle. Both sides are the same geometry, so
+ * the arrows line up and the sparkle never moves anything. */
 .pare-side__btn {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: 24px 40px 18px;
+  justify-items: center;
   align-items: center;
-  gap: 2px;
-  padding: 12px 6px;
+  /* The label starts at the top of its band, so a one-line and a two-line
+   * label share a first line across the two sides. */
+  align-items: start;
+  width: 100%;
+  padding: 6px 2px;
   border-radius: 6px;
   font-size: 15px;
   font-weight: 500;
@@ -194,9 +200,15 @@ a {
 }
 
 .pare-side__arrow {
+  align-self: center;
   font-size: 22px;
   line-height: 1;
-  margin-bottom: 4px;
+}
+
+.pare-side__slot {
+  display: grid;
+  place-items: center;
+  height: 18px;
 }
 
 .pare-side--dispose .pare-side__btn {
@@ -211,7 +223,6 @@ a {
   display: inline-flex;
   align-items: center;
   color: var(--hint);
-  margin-top: 6px;
 }
 
 .pare-extra .pare-suggested {
