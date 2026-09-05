@@ -5,12 +5,13 @@
 :root {
   --font: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
 
-  /* The table */
+  /* The table. Ratios in this block are the worst case, against the light
+   * theme's slightly lighter table. */
   --table: #1a1b1d;
   --table-2: #232426;
   --light: #ecebe6;
-  --light-2: #a9a8a1; /* 7.6:1 on the table */
-  --light-3: #83827c; /* 4.6:1 on the table */
+  --light-2: #a9a8a1; /* 6.8:1 on the table */
+  --light-3: #8a8982; /* 4.6:1 on the table */
   --hair: rgba(255, 255, 255, 0.1);
 
   /* The slide */
@@ -19,15 +20,15 @@
   --mount: rgba(255, 255, 255, 0.22);
   --ink: #1c1b18;
   --ink-2: #4a4944;
-  --ink-3: #6b6a63; /* 5.0:1 on the slide */
+  --ink-3: #6b6a63; /* 4.9:1 on the slide */
 
   /* The two outcomes */
-  --keep: #7fcf9a; /* 9.4:1 on the table */
+  --keep: #7fcf9a; /* 8.7:1 on the table */
   --keep-ink: #2b7a4b;
-  --dispose: #f0877a; /* 7.5:1 on the table */
+  --dispose: #f0877a; /* 6.5:1 on the table */
   --dispose-ink: #b43d2e;
   /* Blue marks what the model suggests, and nothing else. */
-  --hint: #8fb6f2; /* 8.3:1 on the table */
+  --hint: #8fb6f2; /* 7.8:1 on the table */
 
   --card-h: 272px;
 
