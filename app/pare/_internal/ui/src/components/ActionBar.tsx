@@ -1,12 +1,13 @@
 // The actions around the slide. The two outcomes sit at the left and right of
-// the card in their colors; Later and the extra actions sit under it as dim
-// text with digits. The model's suggestion is a blue sparkle next to the
-// action it points at, and blue means that and nothing else. Tooltips name
-// the key and nothing else, so they read the same in every session.
+// the card as discs in their colors, a heart to keep and a cross to dispose,
+// and they swell as the card comes toward them; Later and the extra actions
+// sit under it as dim text with digits. The model's suggestion is a blue
+// sparkle next to the action it points at, and blue means that and nothing
+// else. Tooltips name the key, so they read the same in every session.
 
 import { motion, useTransform, type MotionValue } from "motion/react";
 import { DISPOSE, KEEP, type SessionConfig } from "../../../schema";
-import { SparkleIcon } from "./icons";
+import { CrossIcon, HeartIcon, SparkleIcon } from "./icons";
 
 const stop = (e: React.MouseEvent) => e.preventDefault();
 
@@ -22,7 +23,8 @@ interface SideActionProps {
 export function SideAction({ kind, config, suggested, pull, onAction }: SideActionProps) {
   const action = kind === "keep" ? config.keep : config.dispose;
   const id = kind === "keep" ? KEEP : DISPOSE;
-  const opacity = useTransform(pull, [0, 1], [0.82, 1]);
+  const opacity = useTransform(pull, [0, 1], [0.86, 1]);
+  const scale = useTransform(pull, [0, 1], [1, 1.12]);
   const keys = kind === "keep" ? "→ or Enter" : "←";
   return (
     <div className={`pare-side pare-side--${kind}`}>
@@ -36,9 +38,9 @@ export function SideAction({ kind, config, suggested, pull, onAction }: SideActi
         onClick={() => onAction(id)}
         data-testid={`action-${kind}`}
       >
-        <span className="pare-side__arrow" aria-hidden>
-          {kind === "keep" ? "→" : "←"}
-        </span>
+        <motion.span className="pare-side__mark" style={{ scale }} aria-hidden>
+          {kind === "keep" ? <HeartIcon /> : <CrossIcon />}
+        </motion.span>
         <span className="pare-side__label">{action.label}</span>
         <span className="pare-side__slot">{suggested && <Suggested />}</span>
       </motion.button>

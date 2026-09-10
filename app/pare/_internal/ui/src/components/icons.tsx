@@ -44,6 +44,32 @@ export function UndoIcon() {
   );
 }
 
+// The two outcomes, drawn to fill their disc.
+export function HeartIcon() {
+  return (
+    <svg width={26} height={26} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 20.7C6.1 16.5 3 13.3 3 9.7 3 7 5.1 5 7.7 5c1.7 0 3.3.9 4.3 2.3C13 5.9 14.6 5 16.3 5 18.9 5 21 7 21 9.7c0 3.6-3.1 6.8-9 11z" />
+    </svg>
+  );
+}
+
+export function CrossIcon() {
+  return (
+    <svg
+      width={24}
+      height={24}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.6}
+      strokeLinecap="round"
+      aria-hidden
+    >
+      <path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />
+    </svg>
+  );
+}
+
 // The model's suggestion. Blue, and used for nothing else.
 export function SparkleIcon() {
   return (

@@ -5,6 +5,11 @@
 // only lands on a side once the fingers actually lift. Landing there is the
 // decision.
 //
+// Only the top card rides the scroller. The cards behind it sit outside, so
+// the stack stays still while the top card travels, and the scroller reaches
+// half a viewport past the deck on either side, so a card leaving is cut off
+// by the edge of the panel rather than by a box around the deck.
+//
 // A leaving card becomes a detached "ghost" that finishes its flight while
 // the next card is already live, so a fast run of keypresses never waits on
 // an animation.
@@ -17,6 +22,7 @@ import {
   useState,
   type MutableRefObject,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   animate,
   motion,
@@ -50,7 +56,6 @@ interface Ghost {
   kind: ExitKind;
   fromX: number;
   fromY: number;
-  fromOpacity: number;
   // Horizontal speed at release, so the exit continues the gesture.
   fromVx: number;
 }
@@ -72,6 +77,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
   const reduceMotion = useReducedMotion() ?? false;
   const x = useMotionValue(0);
   const y = useMotionValue(0);
+  const scale = useMotionValue(1);
   const opacity = useMotionValue(1);
   // How far the scroller has carried the card, in the same units as `x`.
   const scrolled = useMotionValue(0);
@@ -91,10 +97,6 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   const travel = useTransform(() => x.get() + scrolled.get());
   const rotate = useTransform(travel, (value) => value * ROTATE_PER_PX);
-  // The card stays solid through the gesture and thins over the last stretch,
-  // so it is nearly gone by the time it reaches the panel's edge.
-  const dragFade = useTransform(travel, [-260, -150, 0, 150, 260], [0.12, 1, 1, 1, 0.12]);
-  const topOpacity = useTransform(() => dragFade.get() * opacity.get());
 
   // The glow follows the card, easing in late so a small nudge shows almost
   // nothing and the light arrives as the card nears the decision.
@@ -110,6 +112,14 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     if (reduceMotion) pull.set(0);
     else animate(pull, 0, { duration: 0.3, ease: EASE_OUT });
   }, [pull, reduceMotion]);
+
+  // A mouse drag moves the card inside the scroller, which changes how far the
+  // scroller can scroll; mandatory snapping answers that by jumping to a snap
+  // point. So snapping is off for the length of a drag.
+  const setSnapping = useCallback((on: boolean) => {
+    const el = scrollerRef.current;
+    if (el) el.style.scrollSnapType = on ? "" : "none";
+  }, []);
 
   // Put the scroller back at its centre without the browser animating there.
   const recentre = useCallback(() => {
@@ -137,7 +147,6 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
         // The ghost starts exactly where the card was, however it got there.
         fromX: isTop ? travel.get() : 0,
         fromY: isTop ? y.get() : 0,
-        fromOpacity: isTop ? dragFade.get() : 1,
         fromVx: isTop ? velocity : 0,
       },
     ]);
@@ -149,14 +158,20 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     releasePull();
   }
 
-  apiRef.current = { exit: launchGhost };
+  // The ghost and the card behind it have to arrive in the same frame as the
+  // scroller going back to centre. A scroll or a keypress is not a React
+  // event, so without this React can render a frame later and the card blinks
+  // back to the middle of the deck before it flies.
+  apiRef.current = { exit: (itemId, kind) => flushSync(() => launchGhost(itemId, kind)) };
 
   function commitSwipe(direction: 1 | -1, velocity = 0) {
     const item = latest.current.items[0];
     if (!item) return;
     const action = direction > 0 ? KEEP : DISPOSE;
-    launchGhost(item.id, action, velocity);
-    latest.current.onSwipe(item.id, action);
+    flushSync(() => {
+      launchGhost(item.id, action, velocity);
+      latest.current.onSwipe(item.id, action);
+    });
   }
 
   function settleBack() {
@@ -164,31 +179,38 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     if (reduceMotion) {
       x.jump(0);
       y.jump(0);
+      setSnapping(true);
       return;
     }
-    animate(x, 0, SPRING);
+    void animate(x, 0, SPRING).then(() => setSnapping(true));
     animate(y, 0, SPRING);
   }
 
-  // The next card starts centred, and a card returning after undo slides in
-  // from where it left.
+  // A card that has just been promoted rises into the place the card above it
+  // left. A card coming back from an undo returns the way it went out.
   useLayoutEffect(() => {
     if (!topId) return;
     const kind = lastExit.current.get(topId);
     lastExit.current.delete(topId);
-    if (!kind || reduceMotion) {
-      x.jump(0);
-      y.jump(0);
-      opacity.jump(1);
+    x.jump(0);
+    y.jump(0);
+    scale.jump(1);
+    opacity.jump(1);
+    if (reduceMotion) return;
+    if (kind) {
+      const distance = flyDistance();
+      x.jump(kind === "keep" ? distance : kind === "dispose" ? -distance : 0);
+      y.jump(kind === "skip" ? 80 : 0);
+      opacity.jump(kind === "fade" ? 0 : 1);
+      animate(x, 0, SPRING);
+      animate(y, 0, SPRING);
+      animate(opacity, 1, { duration: 0.2 });
       return;
     }
-    const distance = flyDistance();
-    x.jump(kind === "keep" ? distance : kind === "dispose" ? -distance : 0);
-    y.jump(kind === "skip" ? 80 : 0);
-    opacity.jump(kind === "fade" ? 0 : 1);
-    animate(x, 0, SPRING);
-    animate(y, 0, SPRING);
-    animate(opacity, 1, { duration: 0.2 });
+    scale.jump(0.97);
+    y.jump(6);
+    animate(scale, 1, SETTLE);
+    animate(y, 0, SETTLE);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topId]);
 
@@ -269,6 +291,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
       if (Math.abs(dx) > 6 && Math.abs(dx) > Math.abs(dy) * 1.2) {
         d.active = true;
         event.currentTarget.setPointerCapture(event.pointerId);
+        setSnapping(false);
         setDragging(true);
       } else if (Math.abs(dy) > 10) {
         drag.current = null;
@@ -304,6 +327,7 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
     const flung =
       Math.abs(d.vx) > 700 && Math.sign(d.vx) === Math.sign(current) && Math.abs(current) > 90;
     if (!cancelled && (Math.abs(current) >= commitDistance() || flung)) {
+      // `recentre` turns snapping back on once the deck is centred again.
       commitSwipe(current > 0 ? 1 : -1, d.vx);
     } else {
       settleBack();
@@ -314,31 +338,36 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
 
   return (
     <div ref={stageRef} className="pare-stage">
-      <div ref={scrollerRef} className="pare-scroller" data-testid="scroller">
-        <div className="pare-throw" style={{ width: THROW }} aria-hidden />
-        <div className="pare-frame">
-          {behind.toReversed().map((item, i) => {
-            const depth = behind.length - i;
-            return (
-              <motion.div
-                key={item.id}
-                className="pare-card pare-card--behind"
-                initial={false}
-                animate={{ scale: 1 - depth * 0.03, y: depth * 6 }}
-                transition={reduceMotion ? { duration: 0 } : SETTLE}
-                style={{ zIndex: 10 - depth }}
-                aria-hidden
-              >
-                <Card item={item} />
-              </motion.div>
-            );
-          })}
+      <div className="pare-behind" aria-hidden>
+        {behind.toReversed().map((item, i) => {
+          const depth = behind.length - i;
+          return (
+            <motion.div
+              key={item.id}
+              className="pare-card pare-card--behind"
+              initial={false}
+              animate={{ scale: 1 - depth * 0.03, y: depth * 6 }}
+              transition={reduceMotion ? { duration: 0 } : SETTLE}
+              style={{ zIndex: 10 - depth }}
+            >
+              <Card item={item} />
+            </motion.div>
+          );
+        })}
+      </div>
 
+      <div ref={scrollerRef} className="pare-scroller" data-testid="scroller">
+        <div
+          className="pare-throw"
+          style={{ width: `calc(${THROW}px + var(--clear))` }}
+          aria-hidden
+        />
+        <div className="pare-frame">
           {top && (
             <motion.div
               key={top.id}
               className={"pare-card pare-card--top" + (dragging ? " is-dragging" : "")}
-              style={{ x, y, rotate, opacity: topOpacity }}
+              style={{ x, y, scale, rotate, opacity }}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={(e) => endDrag(e, false)}
@@ -356,7 +385,11 @@ export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStac
             </motion.div>
           )}
         </div>
-        <div className="pare-throw" style={{ width: THROW }} aria-hidden />
+        <div
+          className="pare-throw"
+          style={{ width: `calc(${THROW}px + var(--clear))` }}
+          aria-hidden
+        />
       </div>
 
       {ghosts.map((ghost) => (
@@ -383,11 +416,13 @@ function GhostCard({
   reduceMotion: boolean;
   onDone: () => void;
 }) {
-  const { kind, fromX, fromY, fromOpacity, fromVx } = ghost;
+  const { kind, fromX, fromY, fromVx } = ghost;
   const flying = kind === "keep" || kind === "dispose";
   const direction = kind === "keep" ? 1 : -1;
+  // A thrown card carries on past the edge of the panel; it fades only at the
+  // end, once it is mostly gone.
   const target = flying
-    ? { x: direction * flyDistance, y: fromY + 18, rotate: direction * 13, opacity: 0 }
+    ? { x: direction * (flyDistance + 160), y: fromY + 18, rotate: direction * 16, opacity: 0 }
     : kind === "skip"
       ? { x: fromX, y: 64, rotate: 0, scale: 0.96, opacity: 0 }
       : { x: fromX, y: fromY - 8, rotate: 0, scale: 0.94, opacity: 0 };
@@ -398,9 +433,9 @@ function GhostCard({
     : flying
       ? {
           x: { type: "spring", stiffness: 140, damping: 24, mass: 0.9, velocity: fromVx },
-          y: { duration: 0.34, ease: EASE_OUT },
-          rotate: { duration: 0.34, ease: EASE_OUT },
-          opacity: { duration: 0.3, ease: EASE_OUT },
+          y: { duration: 0.4, ease: EASE_OUT },
+          rotate: { duration: 0.4, ease: EASE_OUT },
+          opacity: { duration: 0.22, delay: 0.16, ease: EASE_OUT },
         }
       : { duration: 0.24, ease: EASE_OUT };
 
@@ -411,7 +446,7 @@ function GhostCard({
         x: fromX,
         y: fromY,
         rotate: fromX * ROTATE_PER_PX,
-        opacity: fromOpacity,
+        opacity: 1,
         scale: 1,
       }}
       animate={target}
