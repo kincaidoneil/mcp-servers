@@ -243,6 +243,8 @@ a {
   display: grid;
   place-items: center;
   height: 20px;
+  /* Close under the label it belongs to, not adrift below the pair. */
+  margin-top: -6px;
 }
 
 .pare-side--dispose .pare-side__mark {
