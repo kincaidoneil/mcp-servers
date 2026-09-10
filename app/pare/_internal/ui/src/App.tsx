@@ -362,35 +362,33 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
         <>
           <motion.div className="pare-glow pare-glow--dispose" style={{ opacity: disposePull }} />
           <motion.div className="pare-glow pare-glow--keep" style={{ opacity: keepPull }} />
-          <div className="pare-table">
-            <SideAction
-              kind="dispose"
-              config={config}
-              suggested={suggested === DISPOSE}
-              pull={disposePull}
-              onAction={(id) => act(id)}
+          <div className="pare-deck">
+            <CardStack
+              items={queueItems}
+              pull={pull}
+              onSwipe={(itemId, action) => {
+                if (itemId === stateRef.current.session.queue[0]) act(action, true);
+              }}
+              onOpenLink={(url) => void host.openLink(url)}
+              apiRef={stackApi}
             />
-            <div className="pare-slide-col">
-              <CardStack
-                items={queueItems}
-                pull={pull}
-                onSwipe={(itemId, action) => {
-                  if (itemId === stateRef.current.session.queue[0]) act(action, true);
-                }}
-                onOpenLink={(url) => void host.openLink(url)}
-                apiRef={stackApi}
+            <div className="pare-actions">
+              <SideAction
+                kind="dispose"
+                config={config}
+                suggested={suggested === DISPOSE}
+                pull={disposePull}
+                onAction={(id) => act(id)}
               />
               {config.notes && <NoteField value={note} onChange={setNote} inputRef={noteInput} />}
+              <SideAction
+                kind="keep"
+                config={config}
+                suggested={suggested === KEEP}
+                pull={keepPull}
+                onAction={(id) => act(id)}
+              />
             </div>
-            <SideAction
-              kind="keep"
-              config={config}
-              suggested={suggested === KEEP}
-              pull={keepPull}
-              onAction={(id) => act(id)}
-            />
-          </div>
-          <div className="pare-under">
             <ExtraActions
               config={config}
               canSkip={remaining > 1}

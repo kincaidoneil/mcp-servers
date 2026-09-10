@@ -74,8 +74,8 @@ export function CrossIcon() {
 export function SparkleIcon() {
   return (
     <svg
-      width={13}
-      height={13}
+      width={18}
+      height={18}
       viewBox="0 0 16 16"
       fill="currentColor"
       aria-hidden

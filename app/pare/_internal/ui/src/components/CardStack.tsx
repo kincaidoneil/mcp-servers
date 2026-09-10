@@ -68,8 +68,10 @@ const SETTLE = { type: "spring", stiffness: 420, damping: 38 } as const;
 const ROTATE_PER_PX = 9 / 320;
 // How far the scroller travels to either side. The browser lands on whichever
 // snap point is nearest when the gesture ends, so half of this is the distance
-// a swipe has to cover to decide.
-export const THROW = 260;
+// a swipe has to cover to decide. It is short on purpose: a swipe that reaches
+// the end of the scroller before the fingers lift has no momentum left to run
+// off, so the card leaves the moment they do.
+export const THROW = 180;
 
 export function CardStack({ items, onSwipe, onOpenLink, apiRef, pull }: CardStackProps) {
   const stageRef = useRef<HTMLDivElement>(null);

@@ -153,39 +153,47 @@ a {
   color: var(--dispose);
 }
 
-/* ---- The table: side action, slide, side action ------------------------- */
+/* ---- The table: the slide, then the two outcomes under it ---------------- */
 
-.pare-table {
-  display: grid;
-  grid-template-columns: 104px minmax(0, 1fr) 104px;
-  align-items: center;
-  gap: 8px;
+.pare-deck {
+  width: 100%;
+  max-width: 600px;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.pare--fullscreen .pare-table {
-  grid-template-columns: 140px minmax(0, 560px) 140px;
-  justify-content: center;
+.pare--fullscreen .pare-deck {
+  max-width: 680px;
+}
+
+/* One outcome at either end of the row under the slide, the note between.
+ * The row hangs from its top, so the discs stay put as the note grows. */
+.pare-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
 }
 
 .pare-side {
+  flex: none;
+  width: 116px;
   display: flex;
   justify-content: center;
-  /* Above the slide, so a pushed card passes under the outcome it heads for. */
-  position: relative;
-  z-index: 15;
 }
 
 /* Fixed rows: disc, label, sparkle. Both sides are the same geometry, so the
  * discs line up and the sparkle never moves anything. */
 .pare-side__btn {
   display: grid;
-  grid-template-rows: 58px 40px 18px;
+  grid-template-rows: 54px 36px 20px;
+  row-gap: 10px;
   justify-items: center;
   /* The label starts at the top of its band, so a one-line and a two-line
    * label share a first line across the two sides. */
   align-items: start;
   width: 100%;
-  padding: 2px;
   font-size: 14px;
   font-weight: 500;
   line-height: 1.25;
@@ -219,7 +227,7 @@ a {
 .pare-side__slot {
   display: grid;
   place-items: center;
-  height: 18px;
+  height: 20px;
 }
 
 .pare-side--dispose .pare-side__mark {
@@ -285,12 +293,6 @@ a {
   translate: 0 0;
 }
 
-.pare-slide-col {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
 /* ---- Stage and slides ---------------------------------------------------- */
 
 .pare-stage {
@@ -330,9 +332,12 @@ a {
   scroll-snap-type: x mandatory;
   overscroll-behavior-x: contain;
   scrollbar-width: none;
-  /* Room for the card's shadow, which the scroller would otherwise clip. */
-  padding-block: 10px 22px;
-  margin-block: -10px -22px;
+  /* A tilted card lifts its corners well above the deck, and the scroller
+   * clips whatever leaves its box. So the box reaches past the panel on all
+   * four sides, and passes clicks and swipes through to the card. */
+  padding-block: 160px;
+  margin-block: -160px;
+  pointer-events: none;
 }
 
 .pare-scroller::-webkit-scrollbar {
@@ -378,6 +383,7 @@ a {
   top: 0;
   left: 0;
   right: 0;
+  pointer-events: auto;
   touch-action: pan-y;
   cursor: grab;
   user-select: none;
@@ -492,20 +498,7 @@ a {
 
 /* ---- Under the slide ----------------------------------------------------- */
 
-.pare-under {
-  display: grid;
-  grid-template-columns: 104px minmax(0, 1fr) 104px;
-  gap: 8px;
-  align-items: start;
-}
-
-.pare--fullscreen .pare-under {
-  grid-template-columns: 140px minmax(0, 560px) 140px;
-  justify-content: center;
-}
-
 .pare-extras {
-  grid-column: 2;
   display: flex;
   justify-content: center;
   gap: 22px;
@@ -542,7 +535,10 @@ a {
 /* ---- Note ---------------------------------------------------------------- */
 
 .pare-note {
-  margin-top: 16px;
+  flex: 1;
+  min-width: 0;
+  /* The first line of the note sits on the middle of the discs. */
+  margin-top: 13px;
 }
 
 .pare-note textarea {
