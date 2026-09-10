@@ -21,9 +21,11 @@ const START_DESCRIPTION =
   "(sender, project, folder), and a body of one to three short sentences with enough context " +
   "to decide in a few seconds (the card never expands); use meta for up to three facts like " +
   "'Last opened: 14 months ago'. Set the keep and dispose labels to the " +
-  "concrete verbs for this task ('Stay subscribed' / 'Unsubscribe'). Add extra_actions only " +
-  "when the task has a third bucket (Snooze, Delegate, Later). Put your recommendation in " +
-  "suggestion with a one-line reason; the user decides. Up to 500 items; batch a large list " +
+  "concrete verbs for this task ('Stay subscribed' / 'Unsubscribe'). The app already has a " +
+  "Later that defers a card to the end of the stack, so add extra_actions only for a real " +
+  "third outcome (Snooze, Delegate), one or two at most: every extra is another thing to " +
+  "weigh on every card. Put your recommendation in suggestion with a one-line reason, which " +
+  "the app shows on hover; the user decides. Up to 500 items; batch a large list " +
   "into one session rather than several. After every decision the app updates your context " +
   "with the session_id and the full list of decisions so far; when the user finishes, the " +
   "decisions arrive in the chat as a message. Nothing is stored on the server: to reopen a " +

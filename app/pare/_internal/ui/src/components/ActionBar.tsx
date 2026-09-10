@@ -15,12 +15,14 @@ interface SideActionProps {
   kind: "keep" | "dispose";
   config: SessionConfig;
   suggested: boolean;
+  // Why the model suggests it, if it said. Shown on hover, never in the row.
+  reason: string | undefined;
   // 0 at rest, 1 when the card has reached this side's commit distance.
   pull: MotionValue<number>;
   onAction: (actionId: string) => void;
 }
 
-export function SideAction({ kind, config, suggested, pull, onAction }: SideActionProps) {
+export function SideAction({ kind, config, suggested, reason, pull, onAction }: SideActionProps) {
   const action = kind === "keep" ? config.keep : config.dispose;
   const id = kind === "keep" ? KEEP : DISPOSE;
   const opacity = useTransform(pull, [0, 1], [0.86, 1]);
@@ -42,7 +44,7 @@ export function SideAction({ kind, config, suggested, pull, onAction }: SideActi
           {kind === "keep" ? <HeartIcon /> : <CrossIcon />}
         </motion.span>
         <span className="pare-side__label">{action.label}</span>
-        <span className="pare-side__slot">{suggested && <Suggested />}</span>
+        <span className="pare-side__slot">{suggested && <Suggested reason={reason} />}</span>
       </motion.button>
     </div>
   );
@@ -52,6 +54,7 @@ interface ExtraActionsProps {
   config: SessionConfig;
   canSkip: boolean;
   suggestedAction: string | undefined;
+  suggestedReason: string | undefined;
   onAction: (actionId: string) => void;
   onSkip: () => void;
 }
@@ -93,16 +96,25 @@ export function ExtraActions(props: ExtraActionsProps) {
             {i + 1}
           </span>
           {action.label}
-          {props.suggestedAction === action.id && <Suggested />}
+          <span className="pare-extra__slot">
+            {props.suggestedAction === action.id && <Suggested reason={props.suggestedReason} />}
+          </span>
         </button>
       ))}
     </div>
   );
 }
 
-function Suggested() {
+function Suggested({ reason }: { reason: string | undefined }) {
+  const said = reason ? `The model suggests this: ${reason}` : "The model suggests this";
   return (
-    <span className="pare-suggested" aria-label="suggested" data-testid="suggested">
+    <span
+      className="pare-suggested"
+      role="img"
+      aria-label={said}
+      title={said}
+      data-testid="suggested"
+    >
       <SparkleIcon />
     </span>
   );

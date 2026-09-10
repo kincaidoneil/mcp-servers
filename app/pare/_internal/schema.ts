@@ -112,6 +112,13 @@ function refineConfig(config: ConfigShape, ctx: z.RefinementCtx) {
     ids.add(item.id);
   }
   const actionIds = new Set<string>([KEEP, DISPOSE]);
+  // Two buttons that read the same are two buttons the user has to tell apart
+  // mid-decision, which is the fatigue this is meant to remove.
+  const labels = new Map<string, string>([
+    [config.keep.label.trim().toLowerCase(), "keep"],
+    [config.dispose.label.trim().toLowerCase(), "dispose"],
+  ]);
+  if (config.skip) labels.set("later", "the built-in Later");
   for (const [i, action] of config.extra_actions.entries()) {
     if (actionIds.has(action.id)) {
       ctx.addIssue({
@@ -121,6 +128,15 @@ function refineConfig(config: ConfigShape, ctx: z.RefinementCtx) {
       });
     }
     actionIds.add(action.id);
+    const clash = labels.get(action.label.trim().toLowerCase());
+    if (clash) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["extra_actions", i, "label"],
+        message: `label ${action.label} already means ${clash}`,
+      });
+    }
+    labels.set(action.label.trim().toLowerCase(), action.id);
   }
   for (const [i, item] of config.items.entries()) {
     if (item.suggestion && !actionIds.has(item.suggestion.action)) {
@@ -147,7 +163,14 @@ export const SessionSchema = z.object({
   config: SessionConfigSchema,
   decisions: z.record(z.string(), DecisionSchema),
   queue: z.array(z.string()),
+  // Items the user took a decision back off. Absence from `decisions` is not
+  // enough: when the model reopens a session it seeds the decisions it knows
+  // about, and without this the seed would put a corrected one straight back.
+  cleared: z.array(z.string()).default([]),
+  // The pass is over. Separate from `sent`: a user can end a pass without
+  // handing the results to the chat, and a hand-off can fail.
   status: SessionStatusSchema,
+  sent: z.boolean().default(false).describe("A final send to the chat succeeded."),
   updated_at: z.iso.datetime(),
 });
 export type Session = z.infer<typeof SessionSchema>;
@@ -226,7 +249,9 @@ export function buildSession(input: StartInput, sessionId: string, now: string):
     config,
     decisions,
     queue: config.items.filter((item) => !decisions[item.id]).map((item) => item.id),
+    cleared: [],
     status: "open",
+    sent: false,
     updated_at: now,
   };
 }

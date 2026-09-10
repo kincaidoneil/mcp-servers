@@ -1,4 +1,4 @@
-import { useLayoutEffect, type RefObject } from "react";
+import type { RefObject } from "react";
 
 interface NoteFieldProps {
   value: string;
@@ -6,26 +6,11 @@ interface NoteFieldProps {
   inputRef: RefObject<HTMLTextAreaElement | null>;
 }
 
-// Two lines from the start, so the first thing you type moves nothing.
-const MIN_HEIGHT = 51;
-const MAX_HEIGHT = 140;
-
-// A single line under the slide that grows with the text. It is always there
-// and always focused, so typing is commenting; it clears with the card.
+// Two lines under the slide, always there and always focused, so typing is
+// commenting; it clears with the card. The box does not grow with the text:
+// nothing in the deck may move while you are using it, and a note this long
+// is a sign the item should be deferred instead.
 export function NoteField({ value, onChange, inputRef }: NoteFieldProps) {
-  useLayoutEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    const measure = () => {
-      el.style.height = "0px";
-      el.style.height = `${Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, el.scrollHeight))}px`;
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el.parentElement ?? el);
-    return () => observer.disconnect();
-  }, [value, inputRef]);
-
   return (
     <div className="pare-note">
       <textarea
@@ -35,6 +20,9 @@ export function NoteField({ value, onChange, inputRef }: NoteFieldProps) {
         placeholder="Add a note"
         aria-label="Note for this item"
         spellCheck
+        // The session schema caps a note here; over it, the cached session
+        // would fail its own parse on reload and take the progress with it.
+        maxLength={2000}
         onChange={(e) => onChange(e.target.value)}
         data-testid="note"
       />

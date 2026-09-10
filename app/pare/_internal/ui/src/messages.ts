@@ -15,17 +15,27 @@ function tally(session: Session): string {
     .join(", ");
 }
 
-function decisionLines(session: Session, withTitles: boolean): string[] {
-  const byId = new Map(session.config.items.map((item) => [item.id, item]));
+function decisionLines(session: Session, withNotes = true): string[] {
   return Object.values(session.decisions)
     .toSorted((a, b) => (a.decided_at ?? "").localeCompare(b.decided_at ?? ""))
     .map((decision) => {
-      const title = withTitles ? `${byId.get(decision.item_id)?.title ?? ""} ` : "";
-      const note = decision.note ? ` (note: ${decision.note})` : "";
-      return withTitles
-        ? `- ${title}(id: ${decision.item_id}): ${decision.action}${note}`
-        : `${decision.item_id}: ${decision.action}${note}`;
+      const note = withNotes && decision.note ? ` (note: ${decision.note})` : "";
+      return `${decision.item_id}: ${decision.action}${note}`;
     });
+}
+
+// Cut whole lines, never through one, and say exactly how many are missing.
+// A message that stops mid-id reads as if the decision was something else.
+function fit(lines: string[], room: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > room) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const dropped = lines.length - kept.length;
+  return dropped === 0 ? kept.join("\n") : `${kept.join("\n")}\n(${dropped} more not listed)`;
 }
 
 export interface ContextUpdate {
@@ -48,10 +58,7 @@ export function contextUpdate(session: Session): ContextUpdate {
     `dispose = ${config.dispose.label}`,
     ...config.extra_actions.map((a) => `${a.id} = ${a.label}`),
   ].join(", ");
-  let list = decisionLines(session, false).join("\n");
-  if (list.length > CONTEXT_LIMIT) {
-    list = list.slice(0, CONTEXT_LIMIT) + "\n(list truncated; the app has the rest)";
-  }
+  const list = fit(decisionLines(session), CONTEXT_LIMIT);
   const text =
     `Pare session ${session.id} "${config.title}": ${decided} of ${total} decided` +
     (decided ? ` (${tally(session)}).` : ".") +
@@ -107,9 +114,18 @@ export function resultsMessage(session: Session, final: boolean): string {
     sections.push(`Undecided (${undecided}):\n${lines.join("\n")}`);
   }
 
+  // Titles and notes are what make a long session too big to send. Drop them
+  // in that order rather than lose whole decisions off the end.
   let body = sections.join("\n\n");
-  if (head.length + body.length > MESSAGE_LIMIT) {
-    body = decisionLines(session, false).join("\n").slice(0, MESSAGE_LIMIT) + "\n(truncated)";
+  let dropped = "";
+  const room = () => MESSAGE_LIMIT - head.length - dropped.length;
+  if (body.length > room()) {
+    dropped = "\n\n(Item titles omitted: the list was too long to send.)";
+    body = decisionLines(session).join("\n");
   }
-  return `${head}\n\n${body}`.trim();
+  if (body.length > room()) {
+    dropped = "\n\n(Item titles and notes omitted: the list was too long to send.)";
+    body = fit(decisionLines(session, false), room());
+  }
+  return `${head}\n\n${body}${dropped}`.trim();
 }

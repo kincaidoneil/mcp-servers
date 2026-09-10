@@ -28,11 +28,14 @@ export function saveCached(session: Session): boolean {
 }
 
 // Fresh tool input wins on config; the cache wins on decisions it made after
-// the input's seed. A seed decision the cache does not have is kept.
+// the input's seed. A seed decision the cache does not have is kept, unless
+// the cache says the user took that decision back.
 export function mergeCached(fresh: Session, cached: Session | null): Session {
   if (!cached) return fresh;
   const itemIds = new Set(fresh.config.items.map((item) => item.id));
+  const cleared = new Set(cached.cleared);
   const decisions = { ...fresh.decisions };
+  for (const id of cleared) delete decisions[id];
   for (const [id, decision] of Object.entries(cached.decisions)) {
     if (!itemIds.has(id)) continue;
     const seed = decisions[id];
@@ -50,7 +53,11 @@ export function mergeCached(fresh: Session, cached: Session | null): Session {
     ...fresh,
     decisions,
     queue,
-    status: queue.length === 0 && cached.status === "done" ? "done" : "open",
+    cleared: [...cleared].filter((id) => itemIds.has(id) && !decisions[id]),
+    // A finished pass stays finished unless the input brought new items.
+    status:
+      cached.status === "done" && queue.every((id) => cached.queue.includes(id)) ? "done" : "open",
+    sent: cached.sent,
     updated_at: cached.updated_at > fresh.updated_at ? cached.updated_at : fresh.updated_at,
   };
 }

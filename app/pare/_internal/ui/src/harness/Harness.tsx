@@ -95,6 +95,12 @@ export function Harness() {
       const text = message.content
         .map((block) => (block.type === "text" ? block.text : `[${block.type}]`))
         .join("\n");
+      // ?send=fail stands in for a host that declines the message, so the app
+      // can be checked for what it claims after a hand-off that did not land.
+      if (params.get("send") === "fail") {
+        pushLog({ kind: "message", text: `[declined] ${text}` });
+        return { isError: true };
+      }
       pushLog({ kind: "message", text });
       return {};
     };

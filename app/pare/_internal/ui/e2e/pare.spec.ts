@@ -205,3 +205,98 @@ test("full screen is requested through the host", async ({ page }) => {
   await app.getByRole("button", { name: "Exit full screen" }).click();
   await expect(app.getByTestId("pare")).not.toHaveClass(/pare--fullscreen/);
 });
+
+test("a focused control keeps its own keys, and undo reaches back from the summary", async ({
+  page,
+}) => {
+  const app = await open(page, "terse");
+
+  // Enter is the deck's Keep shortcut, but a focused button has to win: the
+  // opposite decision is the worst thing this can do.
+  await app.getByTestId("action-dispose").focus();
+  await page.keyboard.press("Enter");
+  await expect(inContext(page, "q-1")).toHaveAttribute("data-action", "dispose");
+
+  // A held key must not run through the deck.
+  await app.getByTestId("pare").click();
+  await page.keyboard.down("ArrowRight");
+  await page.waitForTimeout(400);
+  await page.keyboard.up("ArrowRight");
+  await expect(decided(page)).toContainText("2 of 3");
+
+  await page.keyboard.press("ArrowRight");
+  await expect(app.getByTestId("summary")).toBeVisible();
+
+  // The last card is the one most likely to be wrong, and the deck is gone.
+  await page.keyboard.press("Control+z");
+  await expect(top(app)).toHaveAttribute("data-item-id", "q-3");
+  await expect(decided(page)).toContainText("2 of 3");
+});
+
+test("a decision taken back stays back when the session is restored", async ({ page }) => {
+  const app = await open(page, "terse");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await expect(app.getByTestId("summary")).toBeVisible();
+  await expect(decided(page)).toContainText("3 of 3");
+
+  // A new conversation: the model reopens the session with the decisions it
+  // was told about. The user changes their mind about one of them.
+  await page.getByTestId("reopen").click();
+  const reopened = page.frameLocator("[data-testid=app]");
+  await reopened.getByRole("button", { name: "Revisit First" }).click();
+  await expect(top(reopened)).toHaveAttribute("data-item-id", "q-1");
+  await expect(reopened.getByTestId("progress")).toContainText("2");
+
+  // The seed still says "keep". Absence from the cache must not let it back in.
+  await page.getByTestId("remount").click();
+  const again = page.frameLocator("[data-testid=app]");
+  await expect(top(again)).toHaveAttribute("data-item-id", "q-1");
+  await expect(again.getByTestId("progress")).toContainText("2");
+});
+
+test("a pass can end with items undecided, and they can be picked up again", async ({ page }) => {
+  const app = await open(page);
+  await page.keyboard.press("ArrowRight");
+
+  await app.getByTestId("menu").click();
+  await app.getByRole("menuitem", { name: /Finish, leaving 11 undecided/ }).click();
+  await expect(app.getByTestId("summary")).toContainText("1 of 12 sorted");
+  await expect(app.getByTestId("summary")).toContainText("Undecided");
+
+  await app.getByTestId("resume").first().click();
+  await expect(top(app)).toBeVisible();
+  await expect(decided(page)).toContainText("open");
+});
+
+test("a hand-off the host declines is not remembered as sent", async ({ page }) => {
+  const app = await open(page, "terse", "&send=fail");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await app.getByTestId("send").click();
+  await expect(app.getByRole("alert")).toContainText("declined");
+  await expect(app.getByTestId("sent")).toHaveCount(0);
+
+  // The session must not come back claiming the chat has the results.
+  await page.getByTestId("remount").click();
+  const again = page.frameLocator("[data-testid=app]");
+  await expect(again.getByTestId("send")).toBeVisible();
+  await expect(again.getByTestId("sent")).toHaveCount(0);
+});
+
+test("a note waits with the item it was written about", async ({ page }) => {
+  const app = await open(page);
+  await app.getByTestId("note").fill("only the Sunday edition");
+  await page.keyboard.press("ArrowDown");
+  await expect(top(app)).toHaveAttribute("data-item-id", "nl-2");
+  await expect(app.getByTestId("note")).toHaveValue("");
+
+  // Coming back to the item brings the words back with it.
+  await page.keyboard.press("Control+z");
+  await expect(top(app)).toHaveAttribute("data-item-id", "nl-1");
+  await expect(app.getByTestId("note")).toHaveValue("only the Sunday edition");
+
+  // And a decision taken back to change it keeps the note that went with it.
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("Control+z");
+  await expect(top(app)).toHaveAttribute("data-item-id", "nl-1");
+  await expect(app.getByTestId("note")).toHaveValue("only the Sunday edition");
+});

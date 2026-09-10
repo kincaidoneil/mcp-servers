@@ -5,7 +5,9 @@ import type { Decision, Session, SessionStatus } from "../../schema";
 
 type HistoryEntry =
   | { kind: "decide"; itemId: string; previousQueue: string[] }
-  | { kind: "skip"; previousQueue: string[] };
+  | { kind: "skip"; previousQueue: string[] }
+  // Deciding the rest at once is one act, so it comes back as one.
+  | { kind: "bulk"; previous: Session };
 
 export interface TriageState {
   session: Session;
@@ -37,6 +39,7 @@ export function decide(
       ...session,
       decisions: { ...session.decisions, [itemId]: decision },
       queue: session.queue.filter((id) => id !== itemId),
+      cleared: session.cleared.filter((id) => id !== itemId),
       updated_at: now,
     },
     history: [...state.history, { kind: "decide", itemId, previousQueue: session.queue }],
@@ -61,10 +64,21 @@ export function canUndo(state: TriageState): boolean {
   return state.history.length > 0;
 }
 
+// The note that went with the decision an undo would take back, so the field
+// can be handed the text back with it.
+export function undoNote(state: TriageState): string {
+  const entry = state.history[state.history.length - 1];
+  if (entry?.kind !== "decide") return "";
+  return state.session.decisions[entry.itemId]?.note ?? "";
+}
+
 export function undo(state: TriageState, now: string): TriageState {
   const entry = state.history[state.history.length - 1];
   if (!entry) return state;
   const history = state.history.slice(0, -1);
+  if (entry.kind === "bulk") {
+    return { history, session: { ...entry.previous, updated_at: now } };
+  }
   if (entry.kind === "skip") {
     return { history, session: { ...state.session, queue: entry.previousQueue, updated_at: now } };
   }
@@ -85,16 +99,42 @@ export function revisit(state: TriageState, itemId: string, now: string): Triage
 function unDecide(session: Session, itemId: string, queue: string[], now: string): Session {
   const decisions = { ...session.decisions };
   delete decisions[itemId];
-  return { ...session, decisions, queue, status: "open", updated_at: now };
+  const cleared = session.cleared.includes(itemId) ? session.cleared : [...session.cleared, itemId];
+  return { ...session, decisions, cleared, queue, status: "open", updated_at: now };
 }
 
 export function decideAllRemaining(state: TriageState, action: string, now: string): TriageState {
-  return state.session.queue.reduce((acc, id) => decide(acc, id, action, "", now), state);
+  const decided = state.session.queue.reduce((acc, id) => decide(acc, id, action, "", now), state);
+  return {
+    session: decided.session,
+    history: [...state.history, { kind: "bulk", previous: state.session }],
+  };
 }
 
 export function setStatus(state: TriageState, status: SessionStatus, now: string): TriageState {
   if (state.session.status === status) return state;
   return { ...state, session: { ...state.session, status, updated_at: now } };
+}
+
+// The results reached the chat. Only a send that came back clean may set this.
+export function markSent(state: TriageState, now: string): TriageState {
+  return { ...state, session: { ...state.session, status: "done", sent: true, updated_at: now } };
+}
+
+// Back to an item from the summary without changing what it was: for one that
+// was never decided.
+export function resume(state: TriageState, itemId: string, now: string): TriageState {
+  const { session } = state;
+  if (!session.queue.includes(itemId)) return state;
+  return {
+    ...state,
+    session: {
+      ...session,
+      queue: [itemId, ...session.queue.filter((id) => id !== itemId)],
+      status: "open",
+      updated_at: now,
+    },
+  };
 }
 
 export function progress(session: Session): { decided: number; total: number } {

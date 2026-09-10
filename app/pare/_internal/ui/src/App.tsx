@@ -143,9 +143,10 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const keepPull = useTransform(pull, [0, 1], [0, 1]);
   const disposePull = useTransform(pull, [-1, 0], [1, 0]);
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState<"final" | "progress" | null>(
-    initial.status === "done" ? "final" : null,
-  );
+  const [sent, setSent] = useState<"final" | "progress" | null>(initial.sent ? "final" : null);
+  // Browser storage can be missing in a sandbox. Say so rather than lose work
+  // quietly: the model's context update is then the only copy.
+  const [saving, setSaving] = useState(true);
   const [sendError, setSendError] = useState<string | null>(null);
   const stackApi = useRef<StackApi | null>(null);
   const noteInput = useRef<HTMLTextAreaElement>(null);
@@ -165,7 +166,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     (fn: (state: S.TriageState) => S.TriageState) => {
       stateRef.current = fn(stateRef.current);
       rerender();
-      saveCached(stateRef.current.session);
+      setSaving(saveCached(stateRef.current.session));
       if (contextTimer.current) clearTimeout(contextTimer.current);
       contextTimer.current = setTimeout(() => {
         contextTimer.current = null;
@@ -175,11 +176,15 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     [pushContext],
   );
 
+  // An unmount inside the debounce window would otherwise drop the last
+  // update, which is the model's only copy of those decisions.
   useEffect(
     () => () => {
-      if (contextTimer.current) clearTimeout(contextTimer.current);
+      if (!contextTimer.current) return;
+      clearTimeout(contextTimer.current);
+      void pushContext();
     },
-    [],
+    [pushContext],
   );
 
   // ---- Decisions ------------------------------------------------------------
@@ -187,8 +192,13 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   // Keyboard shortcuts need focus inside the iframe. The note field holds it
   // when there is one, so typing is commenting; otherwise the app root does.
   const focusRoot = () => (noteInput.current ?? rootRef.current)?.focus({ preventScroll: true });
-  const resetCard = () => {
-    setNote("");
+  // A note is written about an item, so it waits with the item: deferring one
+  // and coming back to it later brings the words back too.
+  const drafts = useRef(new Map<string, string>());
+  const nextCard = (keepDraftFor?: string) => {
+    if (keepDraftFor && noteRef.current.trim()) drafts.current.set(keepDraftFor, noteRef.current);
+    const top = stateRef.current.session.queue[0];
+    setNote((top && drafts.current.get(top)) || "");
     focusRoot();
   };
 
@@ -215,8 +225,9 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
         flashGlow(actionId);
       }
       commit((s) => S.decide(s, item.id, actionId, noteRef.current, now()));
+      drafts.current.delete(item.id);
       setSent((prev) => (prev === "final" ? null : prev));
-      resetCard();
+      nextCard();
     },
     [commit, flashGlow],
   );
@@ -227,35 +238,64 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
     if (!item || current.session.queue.length < 2) return;
     stackApi.current?.exit(item.id, "skip");
     commit((s) => S.skip(s, item.id, now()));
-    resetCard();
+    nextCard(item.id);
   }, [commit]);
 
   const undo = useCallback(() => {
     if (!S.canUndo(stateRef.current)) return;
+    // Undoing a decision to change it hands its note back with it.
+    const taken = S.undoNote(stateRef.current);
     commit((s) => S.undo(s, now()));
-    resetCard();
+    const back = stateRef.current.session.queue[0];
+    // Only when there is something to give back: undoing a Later must leave
+    // the draft that was parked with the item alone.
+    if (back && taken) drafts.current.set(back, taken);
+    nextCard();
   }, [commit]);
 
   const revisit = useCallback(
     (itemId: string) => {
+      const written = stateRef.current.session.decisions[itemId]?.note ?? "";
       commit((s) => S.revisit(s, itemId, now()));
-      setSent(null);
+      drafts.current.set(itemId, written);
+      setNote(written);
       setSendError(null);
       setTimeout(focusRoot, 0);
     },
     [commit],
   );
 
+  // Back to an item that was left undecided when the pass ended.
+  const resume = useCallback(
+    (itemId: string) => {
+      commit((s) => S.resume(s, itemId, now()));
+      setSendError(null);
+      setTimeout(focusRoot, 0);
+    },
+    [commit],
+  );
+
+  // End the pass with items still undecided, so someone who cannot settle the
+  // last one is not stuck with it.
+  const finish = useCallback(() => {
+    commit((s) => S.setStatus(s, "done", now()));
+    setTimeout(focusRoot, 0);
+  }, [commit]);
+
   const send = useCallback(
     async (final: boolean) => {
       setSending(true);
       setSendError(null);
-      if (final) commit((s) => S.setStatus(s, "done", now()));
       if (contextTimer.current) clearTimeout(contextTimer.current);
       await pushContext();
       const result = await host.sendMessage(resultsMessage(stateRef.current.session, final));
-      if (result.ok) setSent(final ? "final" : "progress");
-      else setSendError(result.message);
+      // Only a send that came back clean may be remembered as sent.
+      if (result.ok) {
+        if (final) commit((s) => S.markSent(s, now()));
+        setSent(final ? "final" : "progress");
+      } else {
+        setSendError(result.message);
+      }
       setSending(false);
     },
     [commit, host, pushContext],
@@ -271,18 +311,26 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
 
   // ---- Keyboard -------------------------------------------------------------
   // "Yes, no, comment": right arrow or Enter keeps, left arrow disposes, and
-  // typing is the comment. While the note has text, bare arrows and digits
-  // belong to the text and the modifier makes them decide.
+  // typing is the comment. While the note has text, the bare side arrows and
+  // digits belong to the text and the modifier makes them decide; Enter and
+  // Later always mean what they say.
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const current = stateRef.current;
-      if (current.session.queue.length === 0) return;
       const target = e.target as HTMLElement | null;
       const inNote = target === noteInput.current;
-      const typingElsewhere =
-        !inNote && target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(target.tagName);
-      if (typingElsewhere) return;
+      // Anything else that takes keys keeps them. Enter on a focused button
+      // has to press that button, not decide the card behind it.
+      if (
+        !inNote &&
+        target instanceof HTMLElement &&
+        target.closest("button, a[href], input, textarea, select")
+      ) {
+        return;
+      }
+      // Mid-composition Enter confirms the characters, it does not decide.
+      if (e.isComposing) return;
       const empty = noteRef.current.length === 0;
       const free = !inNote || empty;
       const mod = e.metaKey || e.ctrlKey;
@@ -292,11 +340,18 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
         fn();
       };
 
+      // Undo reaches back past the last card, from the summary.
+      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey && free) return handle(undo);
+      if (current.session.queue.length === 0 || current.session.status === "done") return;
+      // A held key would run through the deck a card at a time.
+      if (e.repeat) return;
+
       if (e.key === "ArrowRight" && (mod || free)) return handle(() => act(KEEP));
       if (e.key === "ArrowLeft" && (mod || free)) return handle(() => act(DISPOSE));
       if (e.key === "Enter" && !e.shiftKey) return handle(() => act(KEEP));
-      if (e.key === "ArrowDown" && (mod || free) && config.skip) return handle(skipTop);
-      if ((e.key === "z" || e.key === "Z") && mod && !e.shiftKey && free) return handle(undo);
+      // Later is how a note that turned into a question gets parked, so it
+      // works while there is text in the note, the way Enter does.
+      if (e.key === "ArrowDown" && config.skip) return handle(skipTop);
       if (e.key === "Escape" && inNote && !empty) return handle(() => setNote(""));
       if (!mod && !e.altKey && free && /^[1-4]$/.test(e.key)) {
         const extra = config.extra_actions[Number(e.key) - 1];
@@ -320,11 +375,13 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   const queueItems = session.queue
     .map((id) => itemById(state, id))
     .filter((item): item is Item => item !== undefined);
-  const top = queueItems[0];
+  const ended = session.status === "done";
+  const top = ended ? undefined : queueItems[0];
   const { decided, total } = S.progress(session);
   const fullscreen = displayMode === "fullscreen";
   const remaining = session.queue.length;
   const suggested = top?.suggestion?.action;
+  const suggestedReason = top?.suggestion?.reason;
 
   const menu = (
     <Menu
@@ -333,6 +390,11 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
           label: "Send progress to chat",
           disabled: decided === 0 || sending || !host.canSendMessage(),
           onSelect: () => void send(false),
+        },
+        {
+          label: `Finish, leaving ${remaining} undecided`,
+          disabled: remaining === 0,
+          onSelect: finish,
         },
         {
           label: `${config.keep.label} all remaining (${remaining})`,
@@ -378,6 +440,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 kind="dispose"
                 config={config}
                 suggested={suggested === DISPOSE}
+                reason={suggestedReason}
                 pull={disposePull}
                 onAction={(id) => act(id)}
               />
@@ -385,6 +448,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 config={config}
                 canSkip={remaining > 1}
                 suggestedAction={suggested}
+                suggestedReason={suggestedReason}
                 onAction={(id) => act(id)}
                 onSkip={skipTop}
               />
@@ -392,6 +456,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 kind="keep"
                 config={config}
                 suggested={suggested === KEEP}
+                reason={suggestedReason}
                 pull={keepPull}
                 onAction={(id) => act(id)}
               />
@@ -401,6 +466,8 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
       ) : (
         <Summary
           session={session}
+          undecided={queueItems}
+          onResume={resume}
           sent={sent}
           sending={sending}
           sendError={sendError}
@@ -408,6 +475,16 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
           onRevisit={revisit}
           onSend={() => void send(true)}
         />
+      )}
+      {/* The card changes under a field whose name never does, so say which
+          item is on the table now. */}
+      <p className="pare-sr" aria-live="polite">
+        {top ? `${top.title}. ${remaining} left of ${total}.` : ""}
+      </p>
+      {!saving && (
+        <p className="pare-warn" role="status">
+          This browser is not keeping your progress. Send it to the chat before you close this.
+        </p>
       )}
       <StatusBar
         decided={decided}
