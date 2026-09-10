@@ -6,7 +6,8 @@ interface NoteFieldProps {
   inputRef: RefObject<HTMLTextAreaElement | null>;
 }
 
-const MIN_HEIGHT = 46;
+// Two lines from the start, so the first thing you type moves nothing.
+const MIN_HEIGHT = 51;
 const MAX_HEIGHT = 140;
 
 // A single line under the slide that grows with the text. It is always there

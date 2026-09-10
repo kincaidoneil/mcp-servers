@@ -372,6 +372,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
               onOpenLink={(url) => void host.openLink(url)}
               apiRef={stackApi}
             />
+            {config.notes && <NoteField value={note} onChange={setNote} inputRef={noteInput} />}
             <div className="pare-actions">
               <SideAction
                 kind="dispose"
@@ -380,7 +381,13 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 pull={disposePull}
                 onAction={(id) => act(id)}
               />
-              {config.notes && <NoteField value={note} onChange={setNote} inputRef={noteInput} />}
+              <ExtraActions
+                config={config}
+                canSkip={remaining > 1}
+                suggestedAction={suggested}
+                onAction={(id) => act(id)}
+                onSkip={skipTop}
+              />
               <SideAction
                 kind="keep"
                 config={config}
@@ -389,13 +396,6 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
                 onAction={(id) => act(id)}
               />
             </div>
-            <ExtraActions
-              config={config}
-              canSkip={remaining > 1}
-              suggestedAction={suggested}
-              onAction={(id) => act(id)}
-              onSkip={skipTop}
-            />
           </div>
         </>
       ) : (

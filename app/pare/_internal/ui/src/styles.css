@@ -161,24 +161,25 @@ a {
   margin-inline: auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .pare--fullscreen .pare-deck {
   max-width: 680px;
 }
 
-/* One outcome at either end of the row under the slide, the note between.
- * The row hangs from its top, so the discs stay put as the note grows. */
+/* The note belongs to the slide, so it keeps the slide's width and sits
+ * right under it. The outcomes are a band of their own below that: one at
+ * either end, on the slide's edges, and the lesser actions between them. */
 .pare-actions {
-  display: flex;
-  align-items: flex-start;
-  gap: 18px;
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr) 116px;
+  align-items: start;
+  gap: 12px;
+  margin-top: 8px;
 }
 
 .pare-side {
-  flex: none;
-  width: 116px;
   display: flex;
   justify-content: center;
 }
@@ -504,6 +505,8 @@ a {
   gap: 22px;
   flex-wrap: wrap;
   min-height: 24px;
+  /* On the centreline of the two discs. */
+  margin-top: 15px;
 }
 
 .pare-extra {
@@ -534,18 +537,17 @@ a {
 
 /* ---- Note ---------------------------------------------------------------- */
 
+/* The caption is taken out of the flow: it appears as you type, and nothing
+ * under the note may move when it does. */
 .pare-note {
-  flex: 1;
-  min-width: 0;
-  /* The first line of the note sits on the middle of the discs. */
-  margin-top: 13px;
+  position: relative;
 }
 
 .pare-note textarea {
   display: block;
   width: 100%;
   resize: none;
-  min-height: 46px;
+  min-height: 51px;
   max-height: 140px;
   padding: 2px 2px 4px;
   border: 0;
@@ -557,7 +559,10 @@ a {
 }
 
 .pare-note__caption {
-  margin: 6px 0 0;
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 2px;
+  margin: 0;
   font-size: 11px;
   color: var(--light-3);
 }
