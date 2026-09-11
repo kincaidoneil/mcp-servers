@@ -32,7 +32,7 @@ function bigSession(count: number, withNotes: boolean) {
 
 // Every id appears exactly once, whole, with an action after it.
 function named(text: string): Set<string> {
-  return new Set(text.match(/item-\d+(?=[:)])/g) ?? []);
+  return new Set(text.match(/item-\d+\b/g) ?? []);
 }
 
 describe("what a long session hands back", () => {
@@ -45,26 +45,29 @@ describe("what a long session hands back", () => {
     }
   });
 
-  test("the message says what it gave up to fit", () => {
-    const long = resultsMessage(bigSession(200, true), true);
-    expect(long).toContain("titles and notes omitted");
+  test("an ordinary session gives up nothing, and says so by saying nothing", () => {
     const short = resultsMessage(bigSession(4, true), true);
     expect(short).toContain("Renewal notice for vendor 1");
     expect(short).toContain(NOTE);
-    expect(short).not.toContain("omitted");
+    expect(short).not.toContain("Dropped to fit");
+
+    // 200 items with a note each is well inside the budget.
+    const typical = resultsMessage(bigSession(200, true), true);
+    expect(typical).toContain(NOTE);
+    expect(typical).not.toContain("Dropped to fit");
   });
 
   // The schema allows 500 items with a 2000-character note each. Even that
-  // comes back whole: what gives way is the prose around the decisions.
+  // keeps every decision: what gives way is the titles the model wrote, then
+  // the length of the notes.
   test("nothing is lost at the largest session the schema allows", () => {
     const session = bigSession(500, true);
     for (const decision of Object.values(session.decisions)) decision.note = "n".repeat(2000);
     const message = resultsMessage(session, true);
     expect(named(message).size).toBe(500);
-    // Never a half line: every id that made it has its action.
-    for (const line of message.split("\n").filter((l) => /^item-\d+/.test(l))) {
-      expect(line).toMatch(/^item-\d+: (keep|dispose)$/);
-    }
+    expect(message).toContain("Dropped to fit: item titles, notes cut short");
+    expect(message).not.toContain("more not listed");
+    expect(message.length).toBeLessThan(40_000);
   });
 
   test("the quiet context update carries the whole list", () => {

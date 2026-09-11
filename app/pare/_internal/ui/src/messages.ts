@@ -1,12 +1,24 @@
-// Text the app sends back to the chat. Two channels: `updateModelContext`
-// after every change (quiet; the host keeps only the latest, so each update
-// carries the whole session state) and `sendMessage` for the final list
-// (posts as the user and triggers a reply).
+// Text the app sends back to the chat, over two channels.
+//
+// `updateModelContext` after every change: quiet, does not make the model
+// reply, and the host keeps only the latest one, so each update carries the
+// whole session. The host holds it until the next turn, which makes it the
+// model's working copy of where the triage has got to.
+//
+// `sendMessage` when the user hands the results over: it posts as the user,
+// starts a turn, and stays in the transcript. That permanence is why the
+// decisions are written into the message itself rather than left to the
+// context update, which the next one replaces.
 
 import { actionLabel, countDecisions, type Session } from "../../schema";
 
-const MESSAGE_LIMIT = 12_000;
-const CONTEXT_LIMIT = 24_000;
+// What either channel will spend on the list, about 10k tokens. An item id
+// and its action cost around 24 characters, so the 500 items a session may
+// hold always fit and a decision is never lost; what is left over pays for
+// the titles and the notes, in that order.
+const LIST_BUDGET = 40_000;
+// A note trimmed shorter than this says nothing, so below it they all go.
+const NOTE_FLOOR = 24;
 
 function tally(session: Session): string {
   return [...countDecisions(session)]
@@ -15,13 +27,33 @@ function tally(session: Session): string {
     .join(", ");
 }
 
-function decisionLines(session: Session, withNotes = true): string[] {
-  return Object.values(session.decisions)
-    .toSorted((a, b) => (a.decided_at ?? "").localeCompare(b.decided_at ?? ""))
-    .map((decision) => {
-      const note = withNotes && decision.note ? ` (note: ${decision.note})` : "";
-      return `${decision.item_id}: ${decision.action}${note}`;
-    });
+const length = (lines: string[]) => lines.reduce((n, line) => n + line.length + 1, 0);
+
+function inOrder(session: Session) {
+  return Object.values(session.decisions).toSorted((a, b) =>
+    (a.decided_at ?? "").localeCompare(b.decided_at ?? ""),
+  );
+}
+
+// The notes, sized to whatever room is left. They are the one thing in a
+// session the model did not write itself, so they are shared out and cut
+// short rather than dropped whole.
+type Notes = { text: (itemId: string) => string; gave_up: string };
+
+function notesWithin(session: Session, room: number): Notes {
+  const noted = inOrder(session).filter((decision) => decision.note);
+  const wanted = noted.reduce((n, decision) => n + decision.note!.length + 10, 0);
+  const each = Math.floor(room / Math.max(1, noted.length)) - 10;
+  const keep = noted.length === 0 || wanted <= room ? Infinity : each >= NOTE_FLOOR ? each : 0;
+  const by = new Map(noted.map((decision) => [decision.item_id, decision.note!]));
+  return {
+    text: (itemId) => {
+      const note = by.get(itemId);
+      if (!note || keep === 0) return "";
+      return note.length <= keep ? ` (note: ${note})` : ` (note: ${note.slice(0, keep)}…)`;
+    },
+    gave_up: keep === Infinity ? "" : keep === 0 ? "notes dropped" : "notes cut short",
+  };
 }
 
 // Cut whole lines, never through one, and say exactly how many are missing.
@@ -58,12 +90,20 @@ export function contextUpdate(session: Session): ContextUpdate {
     `dispose = ${config.dispose.label}`,
     ...config.extra_actions.map((a) => `${a.id} = ${a.label}`),
   ].join(", ");
-  const list = fit(decisionLines(session), CONTEXT_LIMIT);
+  const bare = inOrder(session).map((decision) => `${decision.item_id}: ${decision.action}`);
+  const notes = notesWithin(session, LIST_BUDGET - length(bare));
+  const list = fit(
+    inOrder(session).map(
+      (decision) => `${decision.item_id}: ${decision.action}${notes.text(decision.item_id)}`,
+    ),
+    LIST_BUDGET,
+  );
   const text =
     `Pare session ${session.id} "${config.title}": ${decided} of ${total} decided` +
     (decided ? ` (${tally(session)}).` : ".") +
     ` ${state}\n` +
     (decided ? `Decisions so far (item id: action), where ${legend}:\n${list}\n` : "") +
+    (notes.gave_up ? `(${notes.gave_up}: the list was too long.)\n` : "") +
     `To reopen this session later, call pare-start with the same items, session_id "${session.id}", ` +
     "and these decisions.";
   return {
@@ -93,39 +133,40 @@ export function resultsMessage(session: Session, final: boolean): string {
       (decided ? ` (${tally(session)}).` : ".") +
       " I am still going; act on these when it helps.";
 
-  const sections: string[] = [];
-  for (const actionId of countDecisions(session).keys()) {
-    const lines = config.items
-      .filter((item) => session.decisions[item.id]?.action === actionId)
-      .map((item) => {
-        const decision = session.decisions[item.id]!;
-        return (
-          `- ${item.title} (id: ${item.id})` + (decision.note ? ` (note: ${decision.note})` : "")
+  // The decisions themselves are reserved first: an id and an action for
+  // every item, which always fits. The titles come next, and the model wrote
+  // those, so they are the first thing given up. The notes are last, and are
+  // cut short before any of them is dropped.
+  const build = (withTitles: boolean, notes: Notes) => {
+    const sections: string[] = [];
+    for (const actionId of countDecisions(session).keys()) {
+      const lines = config.items
+        .filter((item) => session.decisions[item.id]?.action === actionId)
+        .map(
+          (item) =>
+            (withTitles ? `- ${item.title} (id: ${item.id})` : `- ${item.id}`) +
+            notes.text(item.id),
         );
-      });
-    if (lines.length === 0) continue;
-    sections.push(`${actionLabel(config, actionId)} (${lines.length}):\n${lines.join("\n")}`);
-  }
-  if (undecided > 0) {
-    const lines = session.queue
-      .map((id) => byId.get(id))
-      .filter((item) => item !== undefined)
-      .map((item) => `- ${item.title} (id: ${item.id})`);
-    sections.push(`Undecided (${undecided}):\n${lines.join("\n")}`);
-  }
+      if (lines.length === 0) continue;
+      sections.push(`${actionLabel(config, actionId)} (${lines.length}):\n${lines.join("\n")}`);
+    }
+    if (undecided > 0) {
+      const lines = session.queue
+        .map((id) => byId.get(id))
+        .filter((item) => item !== undefined)
+        .map((item) => (withTitles ? `- ${item.title} (id: ${item.id})` : `- ${item.id}`));
+      sections.push(`Undecided (${undecided}):\n${lines.join("\n")}`);
+    }
+    return sections.join("\n\n");
+  };
 
-  // Titles and notes are what make a long session too big to send. Drop them
-  // in that order rather than lose whole decisions off the end.
-  let body = sections.join("\n\n");
-  let dropped = "";
-  const room = () => MESSAGE_LIMIT - head.length - dropped.length;
-  if (body.length > room()) {
-    dropped = "\n\n(Item titles omitted: the list was too long to send.)";
-    body = decisionLines(session).join("\n");
-  }
-  if (body.length > room()) {
-    dropped = "\n\n(Item titles and notes omitted: the list was too long to send.)";
-    body = fit(decisionLines(session, false), room());
-  }
-  return `${head}\n\n${body}${dropped}`.trim();
+  const room = LIST_BUDGET - head.length;
+  const full = build(true, notesWithin(session, room));
+  if (full.length <= room) return `${head}\n\n${full}`.trim();
+
+  const floor = length(config.items.map((item) => `- ${item.id}`)) + 200;
+  const notes = notesWithin(session, room - floor);
+  const body = fit(build(false, notes).split("\n"), room - 120);
+  const gave = ["item titles", notes.gave_up].filter(Boolean).join(", ");
+  return `${head}\n\n${body}\n\n(Dropped to fit: ${gave}.)`.trim();
 }
