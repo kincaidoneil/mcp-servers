@@ -1,5 +1,5 @@
 // The actions around the slide. The two outcomes sit at the left and right of
-// the card as discs in their colors, a heart to keep and a cross to dispose,
+// the card as discs in their colors, a tick to keep and a cross to dispose,
 // and they swell as the card comes toward them; Later and the extra actions
 // sit under it as dim text with digits. The model's suggestion is a blue
 // sparkle next to the action it points at, and blue means that and nothing
@@ -7,7 +7,7 @@
 
 import { motion, useTransform, type MotionValue } from "motion/react";
 import { DISPOSE, KEEP, type SessionConfig } from "../../../schema";
-import { CrossIcon, HeartIcon, SparkleIcon } from "./icons";
+import { CheckIcon, CrossIcon, SparkleIcon } from "./icons";
 
 const stop = (e: React.MouseEvent) => e.preventDefault();
 
@@ -41,7 +41,7 @@ export function SideAction({ kind, config, suggested, reason, pull, onAction }: 
         data-testid={`action-${kind}`}
       >
         <motion.span className="pare-side__mark" style={{ scale }} aria-hidden>
-          {kind === "keep" ? <HeartIcon /> : <CrossIcon />}
+          {kind === "keep" ? <CheckIcon /> : <CrossIcon />}
         </motion.span>
         <span className="pare-side__label">{action.label}</span>
         <span className="pare-side__slot">{suggested && <Suggested reason={reason} />}</span>
