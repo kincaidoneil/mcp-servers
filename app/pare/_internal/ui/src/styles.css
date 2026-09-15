@@ -1,0 +1,898 @@
+/* pare: a light table. A charcoal ground in both themes, one light slide at
+ * a time, the two outcomes at its sides. Everything that is not the card is
+ * dim until it is needed. */
+
+:root {
+  --font: "Avenir Next", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  /* The table. Ratios in this block are the worst case, against the light
+   * theme's slightly lighter table. */
+  --table: #1a1b1d;
+  --table-2: #232426;
+  --light: #ecebe6;
+  --light-2: #a9a8a1; /* 6.8:1 on the table */
+  --light-3: #8a8982; /* 4.6:1 on the table */
+  --hair: rgba(255, 255, 255, 0.1);
+
+  /* The slide */
+  --slide: #f4f2ec;
+  --slide-behind: #cfcdc6;
+  --mount: rgba(255, 255, 255, 0.22);
+  --ink: #1c1b18;
+  --ink-2: #4a4944;
+  --ink-3: #6b6a63; /* 4.9:1 on the slide */
+
+  /* The two outcomes */
+  --keep: #7fcf9a; /* 8.7:1 on the table */
+  --keep-ink: #2b7a4b;
+  --dispose: #f0877a; /* 6.5:1 on the table */
+  --dispose-ink: #b43d2e;
+  /* Blue marks what the model suggests, and nothing else. */
+  --hint: #8fb6f2; /* 7.8:1 on the table */
+
+  --card-h: 272px;
+
+  --radius: 5px;
+  --shadow-slide: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 28px -10px rgba(0, 0, 0, 0.6);
+  --shadow-menu: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 12px 32px -8px rgba(0, 0, 0, 0.7);
+}
+
+/* The table is dark in both themes; a light chat gets a dark block, which is
+ * the point of a light table. */
+:root[data-theme="light"] {
+  --table: #202124;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  color: var(--light);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+button:focus-visible,
+a:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--light-2);
+  outline-offset: 2px;
+}
+
+a {
+  color: inherit;
+}
+
+/* ---- Layout -------------------------------------------------------------- */
+
+.pare {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--table);
+  border-radius: 10px;
+  padding: 28px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* A soft light rises from the side the card is pushed toward. */
+.pare-glow {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  pointer-events: none;
+  z-index: -1;
+}
+
+.pare-glow--dispose {
+  left: 0;
+  background: radial-gradient(
+    ellipse 70% 90% at 0% 50%,
+    rgba(240, 135, 122, 0.32),
+    transparent 70%
+  );
+}
+
+.pare-glow--keep {
+  right: 0;
+  background: radial-gradient(
+    ellipse 70% 90% at 100% 50%,
+    rgba(127, 207, 154, 0.32),
+    transparent 70%
+  );
+}
+
+.pare:focus {
+  outline: none;
+}
+
+.pare--fullscreen {
+  min-height: 100vh;
+  border-radius: 0;
+  padding: 48px 32px 24px;
+  justify-content: center;
+  --card-h: 320px;
+}
+
+.pare-status {
+  min-height: 200px;
+  display: grid;
+  place-items: center;
+  color: var(--light-3);
+  font-size: 13px;
+  text-align: center;
+  padding: 24px;
+  background: var(--table);
+  border-radius: 10px;
+}
+
+.pare-status--error {
+  color: var(--dispose);
+}
+
+/* ---- The table: the slide, then the two outcomes under it ---------------- */
+
+.pare-deck {
+  width: 100%;
+  max-width: 600px;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.pare--fullscreen .pare-deck {
+  max-width: 680px;
+}
+
+/* The note belongs to the slide, so it keeps the slide's width and sits
+ * right under it. The outcomes are a band of their own below that: one at
+ * either end, on the slide's edges, and the lesser actions between them. */
+.pare-actions {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr) 116px;
+  align-items: start;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.pare-side {
+  display: flex;
+  justify-content: center;
+}
+
+/* Named columns: with no Later and no extras there is nothing in the middle,
+ * and keep would otherwise slide into it. */
+.pare-side--dispose {
+  grid-column: 1;
+}
+
+.pare-side--keep {
+  grid-column: 3;
+}
+
+.pare-extras {
+  grid-column: 2;
+}
+
+/* Fixed rows: disc, label, sparkle. Both sides are the same geometry, so the
+ * discs line up and the sparkle never moves anything. */
+.pare-side__btn {
+  display: grid;
+  grid-template-rows: 54px 36px 20px;
+  row-gap: 10px;
+  justify-items: center;
+  /* The label starts at the top of its band, so a one-line and a two-line
+   * label share a first line across the two sides. */
+  align-items: start;
+  width: 100%;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--light-2);
+}
+
+.pare-side__btn:hover {
+  color: var(--light);
+}
+
+/* The outcome itself: a disc in its color, which swells as the card comes
+ * toward it. */
+.pare-side__mark {
+  align-self: center;
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  color: var(--table);
+  box-shadow: 0 2px 10px -2px rgba(0, 0, 0, 0.55);
+  transition: filter 120ms;
+}
+
+.pare-side__btn:hover .pare-side__mark {
+  filter: brightness(1.1);
+}
+
+.pare-side__slot {
+  display: grid;
+  place-items: center;
+  height: 20px;
+  /* Close under the label it belongs to, not adrift below the pair. */
+  margin-top: -6px;
+}
+
+.pare-side--dispose .pare-side__mark {
+  background: var(--dispose);
+}
+
+.pare-side--keep .pare-side__mark {
+  background: var(--keep);
+}
+
+.pare-suggested {
+  display: inline-flex;
+  align-items: center;
+  color: var(--hint);
+}
+
+.pare-extra .pare-suggested {
+  margin: 0 0 0 2px;
+}
+
+/* Hover tooltips name the key for every control. */
+[data-tip] {
+  position: relative;
+}
+
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 4px);
+  translate: -50% 3px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #000;
+  color: var(--light);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 40;
+  transition:
+    opacity 120ms ease,
+    translate 120ms ease;
+}
+
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  opacity: 1;
+  translate: -50% 0;
+  transition-delay: 320ms;
+}
+
+.pare-foot [data-tip]::after {
+  left: auto;
+  right: 0;
+  translate: 0 3px;
+}
+
+.pare-foot [data-tip]:hover::after,
+.pare-foot [data-tip]:focus-visible::after {
+  translate: 0 0;
+}
+
+/* ---- Stage and slides ---------------------------------------------------- */
+
+.pare-stage {
+  position: relative;
+  /* The deck stacks within itself: slides behind, then the scroller with the
+   * live card, then a card on its way out. */
+  isolation: isolate;
+  /* Room for the two slides behind. */
+  padding-bottom: 12px;
+  /* How far past the deck the scroller reaches on either side. Half a
+   * viewport puts its edges off the panel, so a card on its way out is cut
+   * off by the panel and not by a box around the deck. */
+  --clear: 50vw;
+}
+
+/* The slides behind the top one. They sit outside the scroller, so a swipe
+ * moves the card and leaves the stack under it alone. */
+.pare-behind {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1;
+}
+
+/* The trackpad gesture is a native scroll with three snap points. The browser
+ * holds the card wherever the fingers are and lands on a side only once they
+ * lift, which is the one moment a page can actually observe. */
+.pare-scroller {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  width: calc(100% + var(--clear) * 2);
+  margin-inline: calc(var(--clear) * -1);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  /* A tilted card lifts its corners well above the deck, and the scroller
+   * clips whatever leaves its box. So the box reaches past the panel on all
+   * four sides, and passes clicks and swipes through to the card. */
+  padding-block: 160px;
+  margin-block: -160px;
+  pointer-events: none;
+}
+
+.pare-scroller::-webkit-scrollbar {
+  display: none;
+}
+
+/* The two spacers and the frame are the three snap points. Widening the
+ * spacers by the same amount as the scroller keeps the throw at THROW. */
+.pare-throw {
+  flex: none;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+}
+
+.pare-frame {
+  position: relative;
+  flex: none;
+  width: calc(100% - var(--clear) * 2);
+  height: var(--card-h);
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
+}
+
+.pare-card {
+  height: var(--card-h);
+  transform-origin: 50% 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius);
+  background: var(--slide);
+  box-shadow:
+    0 0 0 1px var(--mount),
+    var(--shadow-slide);
+  color: var(--ink);
+  padding: 22px 26px 18px;
+  position: relative;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.pare-card--top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  pointer-events: auto;
+  touch-action: pan-y;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  z-index: 10;
+}
+
+.pare-card--top.is-dragging {
+  cursor: grabbing;
+}
+
+.pare-card--behind {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  background: var(--slide-behind);
+  box-shadow: 0 0 0 1px var(--mount);
+  pointer-events: none;
+}
+
+.pare-card--behind > * {
+  opacity: 0.6;
+}
+
+/* A card on its way out, over the whole deck. */
+.pare-card--ghost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.pare-card__title {
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+.pare-card__title a {
+  text-decoration: none;
+  border-bottom: 1px solid rgba(28, 27, 24, 0.25);
+}
+
+.pare-card__title a:hover {
+  border-bottom-color: var(--ink);
+}
+
+.pare-card__source {
+  margin: 5px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Facts pin to the bottom edge, so they land in the same place on every card. */
+.pare-facts {
+  margin: 12px 0 0;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(28, 27, 24, 0.1);
+  flex: none;
+  display: grid;
+  /* A long label may not squeeze the value it belongs to. */
+  grid-template-columns: fit-content(35%) 1fr;
+  column-gap: 16px;
+  row-gap: 3px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.pare-facts__row {
+  display: contents;
+}
+
+.pare-facts dt {
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pare-facts dd {
+  margin: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pare-card__body {
+  /* The one part of the slide that may be cut: the title names the item and
+   * the facts are what the decision turns on. */
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  margin-top: 14px;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.pare-card__body p {
+  margin: 0 0 0.5em;
+}
+
+.pare-card__body p:last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Under the slide ----------------------------------------------------- */
+
+.pare-extras {
+  display: flex;
+  justify-content: center;
+  gap: 22px;
+  flex-wrap: wrap;
+  min-height: 24px;
+  /* On the centreline of the two discs. */
+  margin-top: 15px;
+}
+
+.pare-extra {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--light-2);
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.pare-extra:hover {
+  color: var(--light);
+}
+
+.pare-extra:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.pare-extra__slot {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+}
+
+.pare-extra__key {
+  font-size: 11px;
+  color: var(--light-3);
+  min-width: 10px;
+  text-align: center;
+}
+
+/* ---- Note ---------------------------------------------------------------- */
+
+/* The caption is taken out of the flow: it appears as you type, and nothing
+ * under the note may move when it does. */
+.pare-note {
+  position: relative;
+}
+
+.pare-note textarea {
+  display: block;
+  width: 100%;
+  resize: none;
+  height: 51px;
+  overflow-y: auto;
+  padding: 2px 2px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--hair);
+  background: transparent;
+  color: var(--light);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.pare-note__caption {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 2px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--light-3);
+}
+
+.pare-note textarea::placeholder {
+  color: var(--light-3);
+}
+
+.pare-note textarea:focus {
+  outline: none;
+  border-bottom-color: var(--light-2);
+}
+
+/* Read by assistive technology, drawn for no one. */
+.pare-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.pare-warn {
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--dispose);
+}
+
+/* ---- Status row ---------------------------------------------------------- */
+
+.pare-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--light-2);
+  transition: color 150ms;
+}
+
+.pare-foot:hover,
+.pare-foot:focus-within {
+  opacity: 1;
+}
+
+.pare-count {
+  height: 28px;
+  line-height: 28px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  margin-right: 8px;
+}
+
+.pare-count b {
+  color: var(--light-2);
+  font-weight: 500;
+}
+
+.pare-icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--light-3);
+  transition:
+    background-color 120ms,
+    color 120ms;
+}
+
+.pare-icon-btn:hover {
+  background: var(--table-2);
+  color: var(--light);
+}
+
+.pare-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+  background: none;
+}
+
+.pare-icon-btn svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+/* ---- Menu ---------------------------------------------------------------- */
+
+.pare-menu-wrap {
+  position: relative;
+}
+
+.pare-menu {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  z-index: 30;
+  min-width: 240px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--table-2);
+  box-shadow: var(--shadow-menu);
+  color: var(--light);
+}
+
+.pare-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+
+.pare-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.pare-menu button:disabled {
+  color: var(--light-3);
+  cursor: default;
+  background: none;
+}
+
+.pare-menu__confirm {
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--light-2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pare-menu__confirm button {
+  width: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--hair);
+}
+
+/* ---- Summary ------------------------------------------------------------- */
+
+.pare-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 560px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.pare-summary__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pare-summary__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.pare-summary__counts {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--light-2);
+}
+
+.pare-btn--primary {
+  height: 34px;
+  padding: 0 14px;
+  border-radius: 6px;
+  background: var(--light);
+  color: var(--table);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.pare-btn--primary:hover {
+  background: #ffffff;
+}
+
+.pare-btn--primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.pare-summary__group h3 {
+  margin: 0 0 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  display: flex;
+  justify-content: space-between;
+  color: var(--light-2);
+}
+
+.pare-summary__group--keep h3 {
+  color: var(--keep);
+}
+
+.pare-summary__group--dispose h3 {
+  color: var(--dispose);
+}
+
+.pare-summary__group--undecided h3 {
+  color: var(--light-2);
+}
+
+.pare-summary__group h3 span {
+  font-variant-numeric: tabular-nums;
+  color: var(--light-3);
+}
+
+.pare-summary__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 14px;
+}
+
+.pare-summary__row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.pare-summary__row-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pare-summary__row-sub {
+  font-size: 12px;
+  color: var(--light-3);
+}
+
+.pare-summary__row-note {
+  font-size: 13px;
+  color: var(--light-2);
+  font-style: italic;
+}
+
+.pare-link-btn {
+  font-size: 12px;
+  color: var(--light-3);
+  flex-shrink: 0;
+}
+
+.pare-link-btn:hover {
+  color: var(--light);
+  text-decoration: underline;
+}
+
+.pare-sent {
+  padding: 12px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--hair);
+  font-size: 13px;
+  color: var(--light-2);
+}
+
+/* ---- Narrow hosts -------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .pare-actions {
+    grid-template-columns: 84px minmax(0, 1fr) 84px;
+    gap: 8px;
+  }
+
+  .pare-side__btn {
+    font-size: 13px;
+  }
+
+  .pare {
+    padding: 20px 10px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pare-side__btn,
+  .pare-foot {
+    transition: none;
+  }
+}
