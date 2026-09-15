@@ -39,7 +39,11 @@ export const ItemMetaSchema = z.object({
 
 export const ItemSchema = z.object({
   id: z.string().min(1).max(200).describe("Stable id the caller can map back, e.g. a message id."),
-  title: z.string().min(1).max(200),
+  title: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe("What the item is, in a few words. The largest thing on the card."),
   subtitle: z.string().max(200).optional().describe("Second line, e.g. sender or project."),
   body: z
     .string()
@@ -57,7 +61,7 @@ export const ItemSchema = z.object({
   suggestion: z
     .object({
       action: z.string().min(1).max(32).describe("keep, dispose, or an extra action id."),
-      reason: z.string().max(200).optional(),
+      reason: z.string().max(200).optional().describe("One line. The app shows it on hover."),
     })
     .optional()
     .describe("The agent's recommendation, shown on the card. The user still decides."),
@@ -79,14 +83,21 @@ const SessionConfigBaseSchema = z.object({
     .max(120)
     .describe("What is being triaged, e.g. 'Newsletter subscriptions'."),
   description: z.string().max(300).optional().describe("One sentence framing the decision."),
-  keep: ActionLabelSchema.default({ label: "Keep" }).describe("The right-swipe action."),
-  dispose: ActionLabelSchema.default({ label: "Dispose" }).describe("The left-swipe action."),
+  keep: ActionLabelSchema.default({ label: "Keep" }).describe(
+    "The answer on the right, in this task's own words: 'Stay subscribed', 'Ship', 'Mine'.",
+  ),
+  dispose: ActionLabelSchema.default({ label: "Dispose" }).describe(
+    "The answer on the left: 'Unsubscribe', 'Cut', 'Not mine'.",
+  ),
   extra_actions: z
     .array(ExtraActionSchema)
     .max(4)
     .default([])
     .describe(
-      "Secondary buckets beyond keep/dispose, e.g. Snooze or Delegate. Keys 1 to 4 in the app.",
+      "More buckets beyond the two answers, e.g. Snooze or Delegate. Keys 1 to 4 in the app. " +
+        "The app already has a Later that sends a card to the back of the stack, so add these " +
+        "only for a real third outcome, one or two at most: every extra is another thing to " +
+        "weigh on every card.",
     ),
   notes: z.boolean().default(true).describe("Show the note field so the user can add commentary."),
   skip: z.boolean().default(true).describe("Allow deferring an item to the end of the stack."),

@@ -14,23 +14,23 @@ import {
 
 export const APP_RESOURCE_URI = "ui://pare/app.html";
 
+// What the model reads when it is choosing a tool. It has to stand on its
+// own: the server instructions beside it are a hint a host MAY pass on, and
+// many will not.
 const START_DESCRIPTION =
-  "Open a card-stack triage session in the pare app for many small keep-or-dispose " +
-  "decisions: which newsletters to unsubscribe from, which tasks to delete, which files to " +
-  "archive. Each item is one card. Give every card a short title, a subtitle for the source " +
-  "(sender, project, folder), and a body of one to three short sentences with enough context " +
-  "to decide in a few seconds (the card never expands); use meta for up to three facts like " +
-  "'Last opened: 14 months ago'. Set the keep and dispose labels to the " +
-  "concrete verbs for this task ('Stay subscribed' / 'Unsubscribe'). The app already has a " +
-  "Later that defers a card to the end of the stack, so add extra_actions only for a real " +
-  "third outcome (Snooze, Delegate), one or two at most: every extra is another thing to " +
-  "weigh on every card. Put your recommendation in suggestion with a one-line reason, which " +
-  "the app shows on hover; the user decides. Up to 500 items; batch a large list " +
-  "into one session rather than several. After every decision the app updates your context " +
-  "with the session_id and the full list of decisions so far; when the user finishes, the " +
-  "decisions arrive in the chat as a message. Nothing is stored on the server: to reopen a " +
-  "session later, call pare-start again with the same items, the session_id, and the " +
-  "decisions from the latest context update. Do not re-ask decisions in chat.";
+  "Let the user answer the same question about many things, one card at a time, instead of " +
+  "asking them item by item in the chat. Use it whenever a task comes down to the same quick " +
+  "call repeated over more than about five things: which newsletters to unsubscribe from, " +
+  "which tasks to drop, which files to archive, which bugs are worth fixing, which candidates " +
+  "to advance, which of two dozen photos make the album. Any per-item choice with a small " +
+  "fixed set of answers works. The two sides are whatever this task's two answers are (Keep " +
+  "and Cut, Ship and Hold, Mine and Not mine), and extra_actions adds up to four more " +
+  "buckets. Not for a single item, not where each one needs research before it can be " +
+  "answered, and not for rankings or anything needing a written answer. Every card needs " +
+  "enough on it to decide in a few seconds, since it never expands. Put your recommendation " +
+  "in suggestion; the user decides. Up to 500 items, and one session beats several. After " +
+  "every decision the app puts the whole list of decisions in your context; when the user " +
+  "finishes, they arrive here as a message. Wait for them rather than asking in the chat.";
 
 // No 0/o, 1/l/i so an id read aloud or retyped survives.
 const ID_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
@@ -60,7 +60,7 @@ export function registerTools(server: McpServer) {
     server,
     "pare-start",
     {
-      title: "Start or reopen a pare triage session",
+      title: "Sort a list, one card at a time",
       description: START_DESCRIPTION,
       inputSchema: StartInputBaseSchema.shape,
       outputSchema: StartResultSchema.shape,

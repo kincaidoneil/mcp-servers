@@ -109,7 +109,19 @@ async function main() {
         "pare-start lacks _meta.ui.resourceUri",
       );
       const serverName = client.getServerVersion()?.name;
-      return { detail: `server "${serverName}", 1 tool`, value: undefined };
+      // The instructions are a hint hosts may pass to the model; check they
+      // leave the server at all, since nothing else would say if they stopped.
+      const instructions = client.getInstructions() ?? "";
+      expect(instructions.includes("pare hands the user"), "server sent no instructions");
+      const description = tools[0]?.description ?? "";
+      expect(
+        description.includes("one card at a time") && description.length > 500,
+        "pare-start description is missing or truncated",
+      );
+      return {
+        detail: `server "${serverName}", 1 tool, ${instructions.length} chars of instructions`,
+        value: undefined,
+      };
     });
 
     await step("resources/read ui://pare/app.html", async () => {
