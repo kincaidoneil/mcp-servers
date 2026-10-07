@@ -88,7 +88,10 @@ export async function subscribe(
 
   // Identity uses the URL exactly as sent, so unsubscribe finds it again.
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
-  const existing = await store.readSubscription(id);
+  // A late refresh of an expired subscription starts over, createdAt
+  // included: this event has no replay, so workouts from the lapse are not
+  // delivered.
+  const existing = await store.getSubscription(id);
   if (!existing) {
     const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
     if (live.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
@@ -177,17 +180,7 @@ function nextSecrets(
 export async function unsubscribe(principal: Principal, params: UnsubscribeParams) {
   const { store } = getDeps();
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
-  const existing = await store.readSubscription(id);
-  if (!existing) {
-    const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
-    if (live.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
-      return {
-        ok: false,
-        code: SERVER_ERROR,
-        message: `This account already has ${live.length} subscriptions; unsubscribe one first.`,
-      };
-    }
-  }
+  const existing = await store.getSubscription(id);
   // A subscription id only matches when it was created by this principal, so
   // there is nothing else to authorize.
   if (existing) await store.deleteSubscription(existing);

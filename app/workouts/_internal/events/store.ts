@@ -89,25 +89,18 @@ export function outboxMember(subscriptionId: string, eventId: string): string {
 }
 
 export function createStore(kv: Kv, now: () => number) {
-  // The record, expired or not. Only subscribe needs expired ones: a late
-  // refresh keeps its createdAt and secret history.
-  async function readSubscription(id: string): Promise<SubscriptionRecord | null> {
-    return parse(SubscriptionRecordSchema, await kv.get(key.sub(id)));
-  }
-
   // Expired records are skipped, not deleted: deleting here could race a
   // refresh that rewrites the same key. Redis expiry removes them.
   async function getSubscription(id: string): Promise<SubscriptionRecord | null> {
-    const record = await readSubscription(id);
+    const record = parse(SubscriptionRecordSchema, await kv.get(key.sub(id)));
     return record && record.expiresAt > now() ? record : null;
   }
 
   return {
-    readSubscription,
     getSubscription,
 
     async putSubscription(record: SubscriptionRecord) {
-      // Keep the record a day past expiry so a late refresh still finds it.
+      // A day of slack past expiry; reads treat the record as gone already.
       await kv.set(key.sub(record.id), JSON.stringify(record), {
         px: record.expiresAt - now() + DAY_MS,
       });
