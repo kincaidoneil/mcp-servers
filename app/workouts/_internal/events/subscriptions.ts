@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import type { Principal } from "../credentials";
 import { getDeps } from "../deps";
-import { ensureHevyWebhook } from "../sources";
+import { ensureHevyWebhook, releaseHevyWebhook } from "../sources";
 import { checkCallbackUrl, checkSigningSecret, verifyCallback } from "./callback";
 import {
   CALLBACK_ENDPOINT_ERROR,
@@ -71,7 +71,7 @@ export async function subscribe(
   principal: Principal,
   params: SubscribeParams,
 ): Promise<SubscribeOutcome> {
-  const { store, callbackFetch, now } = getDeps();
+  const { store } = getDeps();
 
   if (params.name !== WORKOUT_COMPLETED) {
     return { ok: false, code: NOT_FOUND, message: `Unknown event: ${params.name}` };
@@ -92,21 +92,51 @@ export async function subscribe(
   // included: this event has no replay, so workouts from the lapse are not
   // delivered.
   const existing = await store.getSubscription(id);
+  const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
   if (!existing) {
-    const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
-    if (live.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
+    const reserved = await store.reserveSubscription(
+      principal.id,
+      id,
+      MAX_SUBSCRIPTIONS_PER_ACCOUNT,
+    );
+    if (!reserved) {
       return {
         ok: false,
         code: SERVER_ERROR,
-        message: `This account already has ${live.length} subscriptions; unsubscribe one first.`,
+        message: `This account already has ${MAX_SUBSCRIPTIONS_PER_ACCOUNT} subscriptions; unsubscribe one first.`,
       };
     }
   }
+  const outcome = await activate(principal, params, {
+    id,
+    url: url.url,
+    args: args.data,
+    existing,
+    live,
+  });
+  if (!outcome.ok && !existing) await store.unreserveSubscription(principal.id, id);
+  return outcome;
+}
+
+async function activate(
+  principal: Principal,
+  params: SubscribeParams,
+  ctx: {
+    id: string;
+    url: string;
+    args: SubscriptionRecord["arguments"];
+    existing: SubscriptionRecord | null;
+    live: SubscriptionRecord[];
+  },
+): Promise<SubscribeOutcome> {
+  const { store, callbackFetch, now } = getDeps();
+  const { id, args, existing } = ctx;
+  const secret = params.delivery.secret;
 
   const verifiedKey = digest([principal.id, params.delivery.url]);
   if (!(await store.isCallbackVerified(verifiedKey))) {
     const verified = await verifyCallback(callbackFetch, {
-      url: url.url,
+      url: ctx.url,
       secret,
       subscriptionId: id,
     });
@@ -121,7 +151,7 @@ export async function subscribe(
     await store.markCallbackVerified(verifiedKey);
   }
 
-  if (!args.data.sources || args.data.sources.includes("hevy")) {
+  if (!args.sources || args.sources.includes("hevy")) {
     // Every subscribe and refresh re-checks the registration, so a webhook
     // removed on Hevy's side comes back within one refresh.
     const webhook = await ensureHevyWebhook(principal);
@@ -135,14 +165,18 @@ export async function subscribe(
     principalId: principal.id,
     hevyUserId: principal.identity.hevyUserId,
     intervalsAthleteId: principal.identity.intervalsAthleteId,
-    arguments: args.data,
-    url: url.url,
+    arguments: args,
+    url: ctx.url,
     secrets: nextSecrets(existing, secret, at),
     createdAt: existing?.createdAt ?? at,
     expiresAt,
   };
-  // The newest credentials serve every subscription on the account.
-  const credentialsUntil = at + MAX_TTL_MS;
+  // The newest credentials serve every subscription on the account, for as
+  // long as the longest-lived one.
+  const credentialsUntil = Math.max(
+    expiresAt,
+    ...ctx.live.filter((s) => s.id !== id).map((s) => s.expiresAt),
+  );
   await store.putCredentials(
     principal.id,
     await sealCredentials(principal.credentials, credentialsUntil, at),
@@ -177,12 +211,29 @@ function nextSecrets(
   ];
 }
 
+function wantsHevy(s: SubscriptionRecord): boolean {
+  return !s.arguments.sources || s.arguments.sources.includes("hevy");
+}
+
 export async function unsubscribe(principal: Principal, params: UnsubscribeParams) {
   const { store } = getDeps();
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
   const existing = await store.getSubscription(id);
   // A subscription id only matches when it was created by this principal, so
   // there is nothing else to authorize.
-  if (existing) await store.deleteSubscription(existing);
+  if (!existing) return {};
+  await store.deleteSubscription(existing);
+
+  // Clean up what only live subscriptions need: the account's credentials,
+  // and the Hevy account's single webhook slot.
+  const remaining = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
+  if (remaining.length === 0) await store.deleteCredentials(principal.id);
+  if (wantsHevy(existing)) {
+    const hevySubs = await store.listSubscriptions({
+      kind: "hevy",
+      hevyUserId: principal.identity.hevyUserId,
+    });
+    if (!hevySubs.some(wantsHevy)) await releaseHevyWebhook(principal).catch(() => undefined);
+  }
   return {};
 }

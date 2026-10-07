@@ -44,6 +44,7 @@ export type OutboxItem = z.infer<typeof OutboxItemSchema>;
 
 const key = {
   sub: (id: string) => `wk:sub:${id}`,
+  reserved: (id: string) => `wk:reserved:${id}`,
   index: (index: SubscriptionIndex) => {
     switch (index.kind) {
       case "all":
@@ -62,7 +63,7 @@ const key = {
   outbox: "wk:outbox",
   outboxItem: (member: string) => `wk:outbox:item:${member}`,
   lease: (member: string) => `wk:lease:${member}`,
-  handled: (athleteId: string) => `wk:intervals:handled:${athleteId}`,
+  handled: (principalId: string) => `wk:intervals:handled:${principalId}`,
 };
 
 function indexesOf(record: SubscriptionRecord): SubscriptionIndex[] {
@@ -100,9 +101,8 @@ export function createStore(kv: Kv, now: () => number) {
     getSubscription,
 
     async putSubscription(record: SubscriptionRecord) {
-      // A day of slack past expiry; reads treat the record as gone already.
       await kv.set(key.sub(record.id), JSON.stringify(record), {
-        px: record.expiresAt - now() + DAY_MS,
+        px: Math.max(record.expiresAt - now(), 1),
       });
       await Promise.all(indexesOf(record).map((index) => kv.sadd(key.index(index), record.id)));
     },
@@ -113,22 +113,47 @@ export function createStore(kv: Kv, now: () => number) {
     },
 
     // Live subscriptions in an index. Ids whose record is gone from Redis are
-    // pruned from the index; expired-but-present ones are only skipped.
+    // pruned, except in the per-account index: there an id may be reserved by
+    // a subscribe still in flight, and reserveSubscription prunes atomically.
     async listSubscriptions(index: SubscriptionIndex): Promise<SubscriptionRecord[]> {
       const ids = await kv.smembers(key.index(index));
       const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
-      await Promise.all(
-        ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
-      );
+      if (index.kind !== "principal") {
+        await Promise.all(
+          ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
+        );
+      }
       return raws
         .map((raw) => parse(SubscriptionRecordSchema, raw))
         .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
     },
 
+    // Reserve a place in the account's index before the slow parts of
+    // subscribing (verification, the Hevy webhook), so concurrent requests
+    // cannot overshoot the cap. Unreserve if subscribing then fails.
+    async reserveSubscription(principalId: string, id: string, max: number) {
+      return kv.reserve({
+        setKey: key.index({ kind: "principal", principalId }),
+        member: id,
+        max,
+        recordPrefix: key.sub(""),
+        markerPrefix: key.reserved(""),
+        // Longer than verification (10 s) plus the Hevy calls.
+        markerPx: 60_000,
+      });
+    },
+    async unreserveSubscription(principalId: string, id: string) {
+      await kv.srem(key.index({ kind: "principal", principalId }), id);
+    },
+
     // One credential record per account, replaced on every subscribe and
-    // refresh, so the newest key is the one used.
+    // refresh, so the newest key is the one used. It lives exactly as long as
+    // the account's longest-lived subscription.
     async putCredentials(principalId: string, sealed: string, until: number) {
-      await kv.set(key.credentials(principalId), sealed, { px: until - now() + DAY_MS });
+      await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+    },
+    async deleteCredentials(principalId: string) {
+      await kv.del(key.credentials(principalId));
     },
     async getCredentials(principalId: string): Promise<string | null> {
       return kv.get(key.credentials(principalId));
@@ -187,11 +212,13 @@ export function createStore(kv: Kv, now: () => number) {
 
     // Activities polling has finished with, so each tick fetches details only
     // for new ones. Correctness does not depend on it: claims dedupe.
-    async getHandledActivities(athleteId: string): Promise<Set<string>> {
-      return new Set(parse(z.array(z.string()), await kv.get(key.handled(athleteId))) ?? []);
+    // Per account, not per athlete: two accounts sharing an athlete must not
+    // mark each other's activities done.
+    async getHandledActivities(principalId: string): Promise<Set<string>> {
+      return new Set(parse(z.array(z.string()), await kv.get(key.handled(principalId))) ?? []);
     },
-    async setHandledActivities(athleteId: string, ids: string[]) {
-      await kv.set(key.handled(athleteId), JSON.stringify(ids), { px: 14 * DAY_MS });
+    async setHandledActivities(principalId: string, ids: string[]) {
+      await kv.set(key.handled(principalId), JSON.stringify(ids), { px: 14 * DAY_MS });
     },
   };
 }
@@ -199,7 +226,7 @@ export function createStore(kv: Kv, now: () => number) {
 export type Store = ReturnType<typeof createStore>;
 
 export async function sealCredentials(credentials: Credentials, until: number, now: number) {
-  const ttlSeconds = Math.ceil((until - now + DAY_MS) / 1000);
+  const ttlSeconds = Math.max(Math.ceil((until - now) / 1000), 1);
   return encryptJwe(
     { typ: "subscription-credentials", credentials },
     getConfig().oauth.signingKey,

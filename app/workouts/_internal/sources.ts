@@ -23,10 +23,25 @@ import { renderActivity } from "./render-activity";
 
 const HEVY_WEBHOOK_PATH = "/webhooks/hevy";
 
+// The URL carries a fingerprint of the signing key, so a webhook whose URL
+// matches was registered with the current token. Hevy may mask the token on
+// reads, so the URL is the only thing worth comparing; after a key rotation
+// the URL differs and the webhook is replaced.
 export function hevyWebhookUrl(hevyUserId: string): string {
   const url = new URL(`${getConfig().oauth.baseUrl}${HEVY_WEBHOOK_PATH}`);
   url.searchParams.set("user", hevyUserId);
+  url.searchParams.set(
+    "k",
+    createHmac("sha256", getConfig().oauth.signingKey)
+      .update("hevy-webhook-url")
+      .digest("base64url")
+      .slice(0, 12),
+  );
   return url.toString();
+}
+
+function isOurs(url: string): boolean {
+  return url.startsWith(`${getConfig().oauth.baseUrl}${HEVY_WEBHOOK_PATH}`);
 }
 
 // Hevy's payload names only the workout, so the URL names the user and this
@@ -61,12 +76,8 @@ export async function ensureHevyWebhook(principal: Principal): Promise<EnsureWeb
 
   const current = await client.getWebhookSubscription();
   if (current.ok) {
-    // Hevy may omit or mask the token on reads; the URL alone is then proof
-    // enough that it is ours and current.
-    const tokenMatches = !current.value.auth_token || current.value.auth_token === authToken;
-    if (current.value.url === url && tokenMatches) return { ok: true };
-    const ours = current.value.url.startsWith(`${getConfig().oauth.baseUrl}${HEVY_WEBHOOK_PATH}`);
-    if (!ours) {
+    if (current.value.url === url) return { ok: true };
+    if (!isOurs(current.value.url)) {
       return {
         ok: false,
         reason:
@@ -90,6 +101,15 @@ export async function ensureHevyWebhook(principal: Principal): Promise<EnsureWeb
         ok: false,
         reason: `Could not register the Hevy webhook (${created.code}); no Hevy webhook is set now.`,
       };
+}
+
+// Give the account's only webhook slot back once nothing here needs it. Leaves
+// a webhook that belongs to another service alone. Best effort: a failure
+// only means the next subscribe finds it still in place.
+export async function releaseHevyWebhook(principal: Principal): Promise<void> {
+  const client = createHevyClient(principal.credentials.hevy.apiKey);
+  const current = await client.getWebhookSubscription();
+  if (current.ok && isOurs(current.value.url)) await client.deleteWebhookSubscription();
 }
 
 function safeHost(url: string): string {
@@ -178,6 +198,7 @@ async function perAccount(
   fn: (
     credentials: Credentials,
     subs: SubscriptionRecord[],
+    principalId: string,
   ) => Promise<{ queued: string[]; retry: boolean; revoke?: boolean }>,
 ): Promise<IngestResult> {
   const { store } = getDeps();
@@ -194,7 +215,7 @@ async function perAccount(
       // Unreadable credentials (expired, or JWT_SIGNING_KEY rotated) cannot
       // recover; the client's next refresh writes fresh ones.
       if (!credentials) return { queued: [], retry: false };
-      const result = await fn(credentials, group);
+      const result = await fn(credentials, group, principalId);
       if (result.revoke) await Promise.all(group.map((s) => store.deleteSubscription(s)));
       return result;
     }),
@@ -299,7 +320,7 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
   const subs = (await store.listSubscriptions({ kind: "intervals", athleteId })).filter(
     wantsSource("intervals"),
   );
-  return perAccount(subs, async (credentials, group) => {
+  return perAccount(subs, async (credentials, group, principalId) => {
     const client = createIntervalsClient(credentials.intervals);
     const listed = await client.listActivities(
       isoDate(now() - 7 * DAY_MS),
@@ -308,7 +329,7 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
     if (!listed.ok) {
       return { queued: [], retry: false, revoke: listed.code === "unauthorized" };
     }
-    const handled = await store.getHandledActivities(athleteId);
+    const handled = await store.getHandledActivities(principalId);
     const oldestSubscription = Math.min(...group.map((s) => s.createdAt));
     const ready = listed.value.filter(
       (a) => a.analyzed || activityCreatedAt(a, now()) < now() - ANALYSIS_GRACE_MS,
@@ -331,7 +352,7 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
     for (const activity of ready) handled.add(activity.id);
     // Only ids still inside the window can come back, so drop the rest.
     await store.setHandledActivities(
-      athleteId,
+      principalId,
       listed.value.map((a) => a.id).filter((id) => handled.has(id)),
     );
     return { queued: queued.flat(), retry: false };

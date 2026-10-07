@@ -39,6 +39,7 @@ const secret = () => `whsec_${randomBytes(32).toString("base64")}`;
 // ---- Upstream fakes ----
 
 let hevyWebhook: { url: string; auth_token: string } | null = null;
+let hevyWebhookDeletes = 0;
 let activities: Record<string, unknown>[] = [];
 
 function activity(id: string, created: string, extra: Record<string, unknown> = {}) {
@@ -79,6 +80,7 @@ const upstream = setupServer(
   }),
   http.delete("https://api.hevyapp.com/v1/webhook-subscription", () => {
     hevyWebhook = null;
+    hevyWebhookDeletes += 1;
     return new HttpResponse(null, { status: 200 });
   }),
   http.get("https://api.hevyapp.com/v1/workouts/:id", ({ params }) =>
@@ -192,6 +194,7 @@ const events = () => received.filter((r) => r.body["type"] !== "verification");
 // ---- Clock and wiring ----
 
 let clock = Date.parse("2026-10-07T14:00:00Z");
+let store: ReturnType<typeof createStore>;
 const now = () => clock;
 
 beforeAll(() => upstream.listen({ onUnhandledRequest: "error" }));
@@ -206,8 +209,10 @@ beforeEach(() => {
   delete process.env["INTERVALS_OAUTH_CLIENT_ID"];
   delete process.env["INTERVALS_WEBHOOK_SECRET"];
   resetConfigCacheForTesting();
-  setDepsForTesting({ store: createStore(memoryKv(now), now), callbackFetch, now });
+  store = createStore(memoryKv(now), now);
+  setDepsForTesting({ store, callbackFetch, now });
   hevyWebhook = null;
+  hevyWebhookDeletes = 0;
   activities = [activity("i100", "2026-10-06T03:10:47Z")];
   received = [];
   receiverStatus = 200;
@@ -404,9 +409,12 @@ describe("/workouts MCP events, end to end", () => {
     expect(received[0]!.body["type"]).toBe("verification");
     expect(received[0]!.headers["x-mcp-subscription-id"]).toBe(subId);
     expect(hevyWebhook).toEqual({
-      url: `${BASE}/workouts/webhooks/hevy?user=${HEVY_USER}`,
+      url: hevyWebhookUrl(HEVY_USER),
       auth_token: hevyWebhookToken(HEVY_USER),
     });
+    expect(hevyWebhookUrl(HEVY_USER)).toMatch(
+      new RegExp(`^${BASE}/workouts/webhooks/hevy\\?user=${HEVY_USER}&k=[\\w-]{12}$`),
+    );
 
     // Re-subscribing with reordered keys is the same subscription, and the
     // verified callback is not challenged again.
@@ -529,6 +537,10 @@ describe("/workouts MCP events, end to end", () => {
         })
       ).json.result,
     ).toMatchObject({ resultType: "complete" });
+    // That was the last subscription wanting Hevy, so the account's one Hevy
+    // webhook slot is released; the Intervals-only one keeps the credentials.
+    expect(hevyWebhook).toBeNull();
+    expect(await store.getCredentials(`${HEVY_USER}:i651018`)).not.toBeNull();
     received = [];
     clock += 20 * 60 * 1000;
     activities.push(activity("i300", new Date(clock - 60_000).toISOString()));
@@ -683,20 +695,19 @@ describe("/workouts MCP events, end to end", () => {
 
   it("caps subscriptions per account and reports verification failures by category", async () => {
     const token = await connect();
-    for (let i = 0; i < 10; i++) {
-      const url = `https://receiver.example.com/cb_${i}`;
-      const s = secret();
-      receiverSecrets.set(url, [s]);
-      // oxlint-disable-next-line no-await-in-loop -- sequential keeps the count exact
-      const r = await rpc(token, "events/subscribe", subscribeParams(url, s));
-      expect(r.json.result?.id).toMatch(/^sub_/);
-    }
-    const eleventh = await rpc(
-      token,
-      "events/subscribe",
-      subscribeParams("https://receiver.example.com/cb_10", secret()),
+    // Twelve at once: the cap holds even when requests race.
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, i) => {
+        const url = `https://receiver.example.com/cb_${i}`;
+        const s = secret();
+        receiverSecrets.set(url, [s]);
+        return rpc(token, "events/subscribe", subscribeParams(url, s));
+      }),
     );
-    expect(eleventh.json.error?.message).toContain("10 subscriptions");
+    expect(results.filter((r) => r.json.result?.id).length).toBe(10);
+    const refused = results.filter((r) => r.json.error);
+    expect(refused).toHaveLength(2);
+    expect(refused[0]!.json.error?.message).toContain("10 subscriptions");
     // The cap never blocks cleanup: unsubscribing something absent still succeeds.
     const absent = await rpc(token, "events/unsubscribe", {
       name: "workout.completed",
@@ -789,6 +800,32 @@ describe("/workouts MCP events, end to end", () => {
     expect(done.headers.get("location")).toMatch(
       /^https:\/\/chatgpt\.com\/connector\/oauth\/callback\?code=/,
     );
+  });
+
+  it("keeps a current Hevy webhook even when Hevy masks its token", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    hevyWebhook = { url: hevyWebhookUrl(HEVY_USER), auth_token: "Bearer ****" };
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    expect(hevyWebhookDeletes).toBe(0);
+    // A webhook from before a signing-key rotation has a different URL and is replaced.
+    hevyWebhook = {
+      url: `${BASE}/workouts/webhooks/hevy?user=${HEVY_USER}&k=oldkeyprint0`,
+      auth_token: "Bearer ****",
+    };
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    expect(hevyWebhookDeletes).toBe(1);
+    expect(hevyWebhook?.url).toBe(hevyWebhookUrl(HEVY_USER));
+
+    // The last unsubscribe deletes the account's stored credentials.
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: {},
+      delivery: { mode: "webhook", url: RECEIVER },
+    });
+    expect(await store.getCredentials(`${HEVY_USER}:i651018`)).toBeNull();
   });
 
   it("serves tools to the model", async () => {

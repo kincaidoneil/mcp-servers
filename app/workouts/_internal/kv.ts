@@ -31,6 +31,19 @@ export interface Kv {
   // schedule it. Returns whether the claim was taken. A crash can therefore
   // never leave a claim without its queued item, or the reverse.
   enqueueOnce(op: EnqueueOnce): Promise<boolean>;
+  // Atomically reserve a place for `member` in a capped set. First drops
+  // members that have neither a record (recordPrefix + member) nor a live
+  // reservation marker (markerPrefix + member), then adds `member` unless the
+  // set is full, marking it reserved for markerPx. Returns whether `member` is
+  // in the set afterwards.
+  reserve(op: {
+    setKey: string;
+    member: string;
+    max: number;
+    recordPrefix: string;
+    markerPrefix: string;
+    markerPx: number;
+  }): Promise<boolean>;
 }
 
 const ENQUEUE_ONCE = `
@@ -40,6 +53,19 @@ if redis.call('SET', KEYS[1], '1', 'NX', 'PX', ARGV[1]) then
   return 1
 end
 return 0`;
+
+const RESERVE = `
+for _, m in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  if m ~= ARGV[1] and redis.call('EXISTS', ARGV[3] .. m) == 0 and redis.call('EXISTS', ARGV[4] .. m) == 0 then
+    redis.call('SREM', KEYS[1], m)
+  end
+end
+if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
+  if redis.call('SCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
+  redis.call('SADD', KEYS[1], ARGV[1])
+end
+redis.call('SET', ARGV[4] .. ARGV[1], '1', 'PX', ARGV[5])
+return 1`;
 
 export function upstashKv(): Kv {
   // The Vercel Marketplace integration injects KV_REST_API_*; a direct Upstash
@@ -96,6 +122,14 @@ export function upstashKv(): Kv {
         [String(op.claimPx), op.item, String(op.itemPx), String(op.score), op.member],
       );
       return Number(taken) === 1;
+    },
+    async reserve(op) {
+      const added = await redis.eval<string[], number | string>(
+        RESERVE,
+        [op.setKey],
+        [op.member, String(op.max), op.recordPrefix, op.markerPrefix, String(op.markerPx)],
+      );
+      return Number(added) === 1;
     },
   };
 }
@@ -160,6 +194,20 @@ export function memoryKv(now: () => number = Date.now): Kv {
       if (!(await kv.set(op.claimKey, "1", { px: op.claimPx, nx: true }))) return false;
       await kv.set(op.itemKey, op.item, { px: op.itemPx });
       await kv.zadd(op.zsetKey, op.score, op.member);
+      return true;
+    },
+    async reserve(op) {
+      const set = sets.get(op.setKey) ?? new Set();
+      for (const m of set) {
+        if (m !== op.member && !live(op.recordPrefix + m) && !live(op.markerPrefix + m))
+          set.delete(m);
+      }
+      if (!set.has(op.member)) {
+        if (set.size >= op.max) return false;
+        set.add(op.member);
+      }
+      sets.set(op.setKey, set);
+      strings.set(op.markerPrefix + op.member, { value: "1", expiresAt: now() + op.markerPx });
       return true;
     },
   };
