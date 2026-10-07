@@ -19,6 +19,7 @@ import {
   UserInfoSchema,
   WorkoutCountSchema,
   WorkoutSchema,
+  WebhookSubscriptionSchema,
   WorkoutWriteSchema,
 } from "./schemas";
 
@@ -42,7 +43,7 @@ export type RoutineWrite = z.infer<typeof RoutineWriteSchema>;
 export type BodyMeasurementWrite = z.infer<typeof BodyMeasurementWriteSchema>;
 
 interface RequestOptions {
-  method?: "GET" | "POST" | "PUT";
+  method?: "GET" | "POST" | "PUT" | "DELETE";
   // Path segments after /v1. Each is percent-encoded, so hostile values like
   // "../x" or "//attacker.example" cannot change the request target.
   segments: (string | number)[];
@@ -220,6 +221,21 @@ export function createHevyClient(apiKey: string) {
     },
     getUserInfo() {
       return request(UserInfoSchema, { segments: ["user", "info"] });
+    },
+    // Hevy keeps at most one webhook per API key, and it fires only when a
+    // workout is created. GET answers 404 when none is set.
+    getWebhookSubscription() {
+      return request(WebhookSubscriptionSchema, { segments: ["webhook-subscription"] });
+    },
+    createWebhookSubscription(subscription: { url: string; authToken: string }) {
+      return request(EmptyResponseSchema, {
+        method: "POST",
+        segments: ["webhook-subscription"],
+        body: subscription,
+      });
+    },
+    deleteWebhookSubscription() {
+      return request(EmptyResponseSchema, { method: "DELETE", segments: ["webhook-subscription"] });
     },
   };
 }
