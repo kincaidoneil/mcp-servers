@@ -81,7 +81,8 @@ const upstream = setupServer(
       description: null,
       start_time: "2026-10-07T12:00:00Z",
       end_time: "2026-10-07T13:05:00Z",
-      created_at: "2026-10-07T13:05:05Z",
+      // Hevy fires its webhook as the workout is saved.
+      created_at: new Date(clock).toISOString(),
       updated_at: "2026-10-07T13:05:05Z",
       exercises: [
         {
@@ -104,13 +105,50 @@ const upstream = setupServer(
   http.get("https://intervals.icu/api/v1/athlete/0/activities", () =>
     HttpResponse.json(activities),
   ),
+  // Two miles at a steady 8:00/mi, HR climbing from 140 to 160.
+  http.get("https://intervals.icu/api/v1/activity/:id/streams", () => {
+    const seconds = 960;
+    const time = Array.from({ length: seconds + 1 }, (_, i) => i);
+    return HttpResponse.json([
+      { type: "time", data: time },
+      { type: "distance", data: time.map((t) => (t * 2 * 1609.344) / seconds) },
+      { type: "heartrate", data: time.map((t) => 140 + Math.round((20 * t) / seconds)) },
+      { type: "cadence", data: time.map(() => 85) },
+      { type: "fixed_altitude", data: time.map((t) => (t < 480 ? t / 48 : 10)) },
+    ]);
+  }),
   http.get("https://intervals.icu/api/v1/activity/:id", ({ params }) => {
     const found = activities.find((a) => a["id"] === params["id"]);
     return found
       ? HttpResponse.json({
           ...found,
           icu_intervals: [
-            { type: "WORK", label: "Rep 1", moving_time: 300, average_heartrate: 170 },
+            {
+              type: "WORK",
+              start_time: 0,
+              elapsed_time: 1200,
+              distance: 4000,
+              average_speed: 3.33,
+              gap: 3.4,
+              average_gradient: 0.01,
+              average_heartrate: 150,
+              max_heartrate: 160,
+              average_cadence: 84,
+              zone: 2,
+            },
+            {
+              type: "WORK",
+              start_time: 1200,
+              elapsed_time: 300,
+              distance: 1200,
+              average_speed: 4,
+              gap: 4.2,
+              average_gradient: 0.03,
+              average_heartrate: 178,
+              max_heartrate: 186,
+              average_cadence: 88,
+              zone: 4,
+            },
           ],
         })
       : new HttpResponse(null, { status: 404 });
@@ -156,8 +194,7 @@ afterEach(() => upstream.resetHandlers());
 beforeEach(() => {
   process.env["PUBLIC_BASE_URL"] = BASE;
   process.env["JWT_SIGNING_KEY"] = randomBytes(32).toString("base64");
-  process.env["ALLOWED_HEVY_USER_IDS"] = HEVY_USER;
-  process.env["ALLOWED_INTERVALS_ATHLETE_IDS"] = "651018";
+  process.env["ALLOWED_WORKOUT_ACCOUNTS"] = `${HEVY_USER}:651018`;
   process.env["WORKOUTS_TICK_SECRET"] = "tick-secret";
   delete process.env["INTERVALS_OAUTH_CLIENT_ID"];
   delete process.env["INTERVALS_WEBHOOK_SECRET"];
@@ -305,6 +342,17 @@ async function tick(secretValue = "tick-secret") {
   return { status: res.status, json: (await res.json()) as Record<string, number> };
 }
 
+// Intervals sends UPLOADED, then ANALYZED a minute later.
+function analyzed(id: string) {
+  return {
+    secret: "hook-secret",
+    events: [
+      { athlete_id: "651018", type: "ACTIVITY_UPLOADED", activity: { id } },
+      { athlete_id: "651018", type: "ACTIVITY_ANALYZED", activity: { id } },
+    ],
+  };
+}
+
 // ---- The test ----
 
 describe("/workouts MCP events, end to end", () => {
@@ -435,7 +483,8 @@ describe("/workouts MCP events, end to end", () => {
       sport: "Run",
       url: "https://intervals.icu/activities/i200",
     });
-    expect(runEvent.data.summary).toContain("Rep 1");
+    expect(runEvent.data.summary).toContain("Intervals (detected by Intervals.icu");
+    expect(runEvent.data.summary).toMatch(/Splits per mi.*\n1 \| 8:00 \| 8:00 \| 145 \| 170 spm/);
     // Both attempts carried the same event id.
     expect(events().every((e) => e.headers["webhook-id"] === "intervals_i200")).toBe(true);
 
@@ -479,17 +528,20 @@ describe("/workouts MCP events, end to end", () => {
     await tick();
     expect(events().map((e) => e.url)).toEqual([RUNS]);
 
-    // A 410 from the receiver ends the subscription.
+    // A 410 drops that one delivery without retrying it; the subscription
+    // carries on.
     receiverStatus = 410;
     clock += 20 * 60 * 1000;
     activities.push(activity("i400", new Date(clock - 60_000).toISOString()));
-    await tick();
+    expect((await tick()).json).toMatchObject({ dropped: 1 });
     receiverStatus = 200;
     received = [];
     clock += 20 * 60 * 1000;
     activities.push(activity("i500", new Date(clock - 60_000).toISOString()));
     await tick();
-    expect(events()).toHaveLength(0);
+    expect(events().map((e) => (e.body as unknown as McpEvent).eventId)).toEqual([
+      "intervals_i500",
+    ]);
   });
 
   it("rejects unsafe callbacks, bad secrets, failed verification, and a foreign Hevy webhook", async () => {
@@ -552,6 +604,156 @@ describe("/workouts MCP events, end to end", () => {
       subscribeParams(RECEIVER, signing, { sources: ["intervals"] }),
     );
     expect(intervalsOnly.json.result?.id).toMatch(/^sub_/);
+  });
+
+  it("does not replay workouts from a gap between subscriptions", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    const params = subscribeParams(RECEIVER, signing, { sources: ["intervals"] });
+    await rpc(token, "events/subscribe", params);
+    await tick();
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: { sources: ["intervals"] },
+      delivery: { mode: "webhook", url: RECEIVER },
+    });
+    // A run lands while nobody is subscribed.
+    clock += 60 * 60 * 1000;
+    activities.push(activity("i700", new Date(clock).toISOString()));
+    clock += 24 * 60 * 60 * 1000;
+    await rpc(token, "events/subscribe", params);
+    received = [];
+    await tick();
+    expect(events()).toHaveLength(0);
+    // The next run after resubscribing does arrive.
+    clock += 60 * 60 * 1000;
+    activities.push(activity("i701", new Date(clock).toISOString()));
+    await tick();
+    expect(events().map((e) => (e.body as unknown as McpEvent).eventId)).toEqual([
+      "intervals_i701",
+    ]);
+  });
+
+  it("asks Hevy to redeliver when the workout is not readable yet", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    received = [];
+    upstream.use(
+      http.get(
+        "https://api.hevyapp.com/v1/workouts/:id",
+        () => new HttpResponse(null, { status: 404 }),
+      ),
+    );
+    expect(await hevyWebhookCall("e1085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(503);
+    upstream.resetHandlers();
+    expect(await hevyWebhookCall("e1085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(200);
+    expect(events()).toHaveLength(1);
+  });
+
+  it("caps subscriptions per account and reports verification failures by category", async () => {
+    const token = await connect();
+    for (let i = 0; i < 10; i++) {
+      const url = `https://receiver.example.com/cb_${i}`;
+      const s = secret();
+      receiverSecrets.set(url, [s]);
+      // oxlint-disable-next-line no-await-in-loop -- sequential keeps the count exact
+      const r = await rpc(token, "events/subscribe", subscribeParams(url, s));
+      expect(r.json.result?.id).toMatch(/^sub_/);
+    }
+    const eleventh = await rpc(
+      token,
+      "events/subscribe",
+      subscribeParams("https://receiver.example.com/cb_10", secret()),
+    );
+    expect(eleventh.json.error?.message).toContain("10 subscriptions");
+
+    setDepsForTesting({
+      store: createStore(memoryKv(now), now),
+      callbackFetch: async () => ({ status: 502, text: async () => "" }),
+      now,
+    });
+    const down = await rpc(token, "events/subscribe", subscribeParams(RECEIVER, secret()));
+    expect(down.json.error).toMatchObject({ code: -32015, data: { reason: "http_5xx" } });
+    const unknown = await rpc(token, "events/subscribe", {
+      ...subscribeParams(RECEIVER, secret()),
+      name: "workout.started",
+    });
+    expect(unknown.json.error?.code).toBe(-32011);
+  });
+
+  it("connects Intervals by OAuth only from the browser that started it", async () => {
+    process.env["INTERVALS_OAUTH_CLIENT_ID"] = "client-123";
+    process.env["INTERVALS_OAUTH_CLIENT_SECRET"] = "secret-456";
+    resetConfigCacheForTesting();
+    upstream.use(
+      http.post("https://intervals.icu/api/oauth/token", async ({ request }) => {
+        const form = new URLSearchParams(await request.text());
+        return form.get("code") === "good-code" && form.get("client_secret") === "secret-456"
+          ? HttpResponse.json({
+              token_type: "Bearer",
+              access_token: "oauth-token",
+              scope: "ACTIVITY:READ",
+              athlete: { id: "651018", name: "Kincaid" },
+            })
+          : new HttpResponse(null, { status: 400 });
+      }),
+    );
+
+    const { POST: register } = await import("../../oauth/register/route");
+    const reg = await register(
+      new Request(`${BASE}/workouts/oauth/register`, {
+        method: "POST",
+        body: JSON.stringify({ redirect_uris: [CLIENT_REDIRECT] }),
+      }),
+    );
+    const { client_id } = (await reg.json()) as { client_id: string };
+    const { getConfig } = await import("../config");
+    const authorized = await validateAuthorize(
+      {
+        client_id,
+        redirect_uri: CLIENT_REDIRECT,
+        response_type: "code",
+        code_challenge: "x".repeat(43),
+        code_challenge_method: "S256",
+        state: null,
+        scope: null,
+      },
+      getConfig().oauth,
+    );
+    if (!authorized.ok) throw new Error("authorize failed");
+    const { POST: submit } = await import("../../oauth/submit/route");
+    const form = new FormData();
+    form.set("as_state", authorized.asState);
+    form.set("hevy_api_key", HEVY_KEY);
+    const toIntervals = await submit(
+      new Request(`${BASE}/workouts/oauth/submit`, { method: "POST", body: form }),
+    );
+    expect(toIntervals.status).toBe(303);
+    const location = new URL(toIntervals.headers.get("location")!);
+    expect(location.origin + location.pathname).toBe("https://intervals.icu/oauth/authorize");
+    expect(location.searchParams.get("redirect_uri")).toBe(
+      `${BASE}/workouts/oauth/intervals-callback`,
+    );
+    const cookie = toIntervals.headers.get("set-cookie")!.split(";")[0]!;
+
+    const { GET: callback } = await import("../../oauth/intervals-callback/route");
+    const back = (headers: Record<string, string>) =>
+      callback(
+        new Request(
+          `${BASE}/workouts/oauth/intervals-callback?code=good-code&state=${location.searchParams.get("state")}`,
+          { headers },
+        ),
+      );
+    // Someone else's browser (no cookie) cannot finish this flow.
+    expect((await back({})).status).toBe(400);
+    const done = await back({ cookie });
+    expect(done.status).toBe(302);
+    expect(done.headers.get("location")).toMatch(
+      /^https:\/\/chatgpt\.com\/connector\/oauth\/callback\?code=/,
+    );
   });
 
   it("serves tools to the model", async () => {
@@ -620,18 +822,21 @@ describe("/workouts MCP events, end to end", () => {
     process.env["INTERVALS_WEBHOOK_SECRET"] = "hook-secret";
     resetConfigCacheForTesting();
     expect(await call({ secret: "wrong", events: [] })).toBe(401);
-    const payload = {
-      secret: "hook-secret",
-      events: [
-        { athlete_id: "651018", type: "ACTIVITY_UPLOADED", activity: { id: "i100" } },
-        { athlete_id: "651018", type: "ACTIVITY_ANALYZED", activity: { id: "i100" } },
-      ],
-    };
-    expect(await call(payload)).toBe(200);
+
+    // Re-analysis of an activity from before the subscription is not news.
+    expect(await call(analyzed("i100"))).toBe(200);
+    expect(events()).toHaveLength(0);
+
+    clock += 60_000;
+    activities.push(activity("i600", new Date(clock).toISOString()));
+    expect(await call(analyzed("i600"))).toBe(200);
     expect(events()).toHaveLength(1);
-    expect((events()[0]!.body as unknown as McpEvent).eventId).toBe("intervals_i100");
-    // Re-analysis of the same activity does not notify twice.
-    expect(await call(payload)).toBe(200);
+    expect((events()[0]!.body as unknown as McpEvent).eventId).toBe("intervals_i600");
+    // Re-analysis of the same activity does not notify twice, and neither
+    // does the polling backstop.
+    expect(await call(analyzed("i600"))).toBe(200);
+    clock += 20 * 60 * 1000;
+    expect((await tick()).json).toMatchObject({ queuedFromPolling: 0 });
     expect(events()).toHaveLength(1);
   });
 });

@@ -61,10 +61,9 @@ export function toPrincipal(upstream: string, identity: unknown): Principal | nu
   };
 }
 
-export function isAllowed(identity: Identity): boolean {
-  const { allowlist } = getConfig();
-  return (
-    allowlist.hevyUserIds.includes(identity.hevyUserId) &&
-    allowlist.intervalsAthleteIds.includes(identity.intervalsAthleteId)
+export function isAllowed(account: { hevyUserId: string; intervalsAthleteId: string }): boolean {
+  return getConfig().accounts.some(
+    (a) =>
+      a.hevyUserId === account.hevyUserId && a.intervalsAthleteId === account.intervalsAthleteId,
   );
 }

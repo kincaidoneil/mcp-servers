@@ -1,5 +1,7 @@
-// Durable event state in Redis: subscriptions and their indexes, emitted-event
-// dedupe, the delivery outbox, and Intervals polling baselines.
+// Durable event state in Redis: subscriptions and their indexes, each
+// account's sealed upstream credentials, the delivery outbox with its
+// per-subscription dedupe claims, and which Intervals activities polling has
+// already handled.
 
 import { z } from "zod";
 import { decryptJwe, encryptJwe } from "@/lib/oauth-as";
@@ -9,15 +11,16 @@ import type { Kv } from "../kv";
 import { SubscriptionArgumentsSchema, type McpEvent } from "./schema";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// How long a delivered (or queued) event stays claimed for a subscription.
+// Longer than any window in which the same workout could be seen again.
+const CLAIM_MS = 30 * DAY_MS;
+const ITEM_MS = 3 * DAY_MS;
 
 const SubscriptionRecordSchema = z.object({
   id: z.string(),
   principalId: z.string(),
   hevyUserId: z.string(),
   intervalsAthleteId: z.string(),
-  // Credentials stay in their own encrypted envelope, so a Redis dump alone
-  // reveals no API keys.
-  sealedCredentials: z.string(),
   arguments: SubscriptionArgumentsSchema,
   url: z.string(),
   // Newest first. A replaced secret keeps signing until retiresAt.
@@ -30,6 +33,7 @@ export type SubscriptionRecord = z.infer<typeof SubscriptionRecordSchema>;
 export type SubscriptionIndex =
   | { kind: "hevy"; hevyUserId: string }
   | { kind: "intervals"; athleteId: string }
+  | { kind: "principal"; principalId: string }
   | { kind: "all" };
 
 const OutboxItemSchema = z.object({
@@ -40,18 +44,25 @@ export type OutboxItem = z.infer<typeof OutboxItemSchema>;
 
 const key = {
   sub: (id: string) => `wk:sub:${id}`,
-  index: (index: SubscriptionIndex) =>
-    index.kind === "all"
-      ? "wk:subs:all"
-      : index.kind === "hevy"
-        ? `wk:subs:hevy:${index.hevyUserId}`
-        : `wk:subs:intervals:${index.athleteId}`,
+  index: (index: SubscriptionIndex) => {
+    switch (index.kind) {
+      case "all":
+        return "wk:subs:all";
+      case "hevy":
+        return `wk:subs:hevy:${index.hevyUserId}`;
+      case "intervals":
+        return `wk:subs:intervals:${index.athleteId}`;
+      case "principal":
+        return `wk:subs:principal:${index.principalId}`;
+    }
+  },
+  credentials: (principalId: string) => `wk:credentials:${principalId}`,
   verified: (digest: string) => `wk:verified:${digest}`,
-  emitted: (eventId: string) => `wk:emitted:${eventId}`,
+  claim: (subscriptionId: string, eventId: string) => `wk:claim:${subscriptionId}:${eventId}`,
   outbox: "wk:outbox",
   outboxItem: (member: string) => `wk:outbox:item:${member}`,
   lease: (member: string) => `wk:lease:${member}`,
-  known: (athleteId: string) => `wk:intervals:known:${athleteId}`,
+  handled: (athleteId: string) => `wk:intervals:handled:${athleteId}`,
 };
 
 function indexesOf(record: SubscriptionRecord): SubscriptionIndex[] {
@@ -59,30 +70,41 @@ function indexesOf(record: SubscriptionRecord): SubscriptionIndex[] {
     { kind: "all" },
     { kind: "hevy", hevyUserId: record.hevyUserId },
     { kind: "intervals", athleteId: record.intervalsAthleteId },
+    { kind: "principal", principalId: record.principalId },
   ];
 }
 
+function parse<T>(schema: z.ZodType<T>, raw: string | null): T | null {
+  if (raw === null) return null;
+  try {
+    const parsed = schema.safeParse(JSON.parse(raw));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
+export function outboxMember(subscriptionId: string, eventId: string): string {
+  return `${subscriptionId} ${eventId}`;
+}
+
 export function createStore(kv: Kv, now: () => number) {
-  async function getSubscription(id: string): Promise<SubscriptionRecord | null> {
-    const raw = await kv.get(key.sub(id));
-    if (!raw) return null;
-    const parsed = SubscriptionRecordSchema.safeParse(JSON.parse(raw));
-    if (!parsed.success) return null;
-    if (parsed.data.expiresAt <= now()) {
-      await deleteSubscription(parsed.data);
-      return null;
-    }
-    return parsed.data;
+  // The record, expired or not. Only subscribe needs expired ones: a late
+  // refresh keeps its createdAt and secret history.
+  async function readSubscription(id: string): Promise<SubscriptionRecord | null> {
+    return parse(SubscriptionRecordSchema, await kv.get(key.sub(id)));
   }
 
-  async function deleteSubscription(record: SubscriptionRecord) {
-    await kv.del(key.sub(record.id));
-    await Promise.all(indexesOf(record).map((index) => kv.srem(key.index(index), record.id)));
+  // Expired records are skipped, not deleted: deleting here could race a
+  // refresh that rewrites the same key. Redis expiry removes them.
+  async function getSubscription(id: string): Promise<SubscriptionRecord | null> {
+    const record = await readSubscription(id);
+    return record && record.expiresAt > now() ? record : null;
   }
 
   return {
+    readSubscription,
     getSubscription,
-    deleteSubscription,
 
     async putSubscription(record: SubscriptionRecord) {
       // Keep the record a day past expiry so a late refresh still finds it.
@@ -92,12 +114,31 @@ export function createStore(kv: Kv, now: () => number) {
       await Promise.all(indexesOf(record).map((index) => kv.sadd(key.index(index), record.id)));
     },
 
-    // Live subscriptions in an index. Ids whose record is gone are pruned.
+    async deleteSubscription(record: SubscriptionRecord) {
+      await kv.del(key.sub(record.id));
+      await Promise.all(indexesOf(record).map((index) => kv.srem(key.index(index), record.id)));
+    },
+
+    // Live subscriptions in an index. Ids whose record is gone from Redis are
+    // pruned from the index; expired-but-present ones are only skipped.
     async listSubscriptions(index: SubscriptionIndex): Promise<SubscriptionRecord[]> {
       const ids = await kv.smembers(key.index(index));
-      const records = await Promise.all(ids.map(getSubscription));
-      await Promise.all(ids.map((id, i) => (records[i] ? null : kv.srem(key.index(index), id))));
-      return records.filter((r): r is SubscriptionRecord => r !== null);
+      const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
+      await Promise.all(
+        ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
+      );
+      return raws
+        .map((raw) => parse(SubscriptionRecordSchema, raw))
+        .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
+    },
+
+    // One credential record per account, replaced on every subscribe and
+    // refresh, so the newest key is the one used.
+    async putCredentials(principalId: string, sealed: string, until: number) {
+      await kv.set(key.credentials(principalId), sealed, { px: until - now() + DAY_MS });
+    },
+    async getCredentials(principalId: string): Promise<string | null> {
+      return kv.get(key.credentials(principalId));
     },
 
     async isCallbackVerified(digest: string) {
@@ -107,33 +148,35 @@ export function createStore(kv: Kv, now: () => number) {
       await kv.set(key.verified(digest), "1", { px: DAY_MS });
     },
 
-    // True the first time an event id is seen, false on every repeat. Makes
-    // upstream retries and re-analysis harmless.
-    async claimEmission(eventId: string) {
-      return kv.set(key.emitted(eventId), "1", { px: 30 * DAY_MS, nx: true });
-    },
-    async releaseEmission(eventId: string) {
-      await kv.del(key.emitted(eventId));
-    },
-
-    async enqueue(subscriptionId: string, event: McpEvent): Promise<string> {
-      const member = `${subscriptionId} ${event.eventId}`;
+    // Queue an event for one subscription unless it was queued before.
+    // Returns the outbox member when newly queued.
+    async enqueueOnce(subscriptionId: string, event: McpEvent): Promise<string | null> {
+      const member = outboxMember(subscriptionId, event.eventId);
       const item: OutboxItem = { event, attempts: 0 };
-      await kv.set(key.outboxItem(member), JSON.stringify(item), { px: 3 * DAY_MS });
-      await kv.zadd(key.outbox, now(), member);
-      return member;
+      const taken = await kv.enqueueOnce({
+        claimKey: key.claim(subscriptionId, event.eventId),
+        claimPx: CLAIM_MS,
+        itemKey: key.outboxItem(member),
+        item: JSON.stringify(item),
+        itemPx: ITEM_MS,
+        zsetKey: key.outbox,
+        score: now(),
+        member,
+      });
+      return taken ? member : null;
     },
     async dueOutbox(limit: number) {
       return kv.zrangeByScore(key.outbox, now(), limit);
     },
+    async isDue(member: string) {
+      const score = await kv.zscore(key.outbox, member);
+      return score !== null && score <= now();
+    },
     async getOutboxItem(member: string): Promise<OutboxItem | null> {
-      const raw = await kv.get(key.outboxItem(member));
-      if (!raw) return null;
-      const parsed = OutboxItemSchema.safeParse(JSON.parse(raw));
-      return parsed.success ? parsed.data : null;
+      return parse(OutboxItemSchema, await kv.get(key.outboxItem(member)));
     },
     async rescheduleOutbox(member: string, item: OutboxItem, at: number) {
-      await kv.set(key.outboxItem(member), JSON.stringify(item), { px: 3 * DAY_MS });
+      await kv.set(key.outboxItem(member), JSON.stringify(item), { px: ITEM_MS });
       await kv.zadd(key.outbox, at, member);
     },
     async removeOutbox(member: string) {
@@ -149,20 +192,21 @@ export function createStore(kv: Kv, now: () => number) {
       await kv.del(key.lease(member));
     },
 
-    async getKnownActivities(athleteId: string): Promise<string[] | null> {
-      const raw = await kv.get(key.known(athleteId));
-      return raw ? (JSON.parse(raw) as string[]) : null;
+    // Activities polling has finished with, so each tick fetches details only
+    // for new ones. Correctness does not depend on it: claims dedupe.
+    async getHandledActivities(athleteId: string): Promise<Set<string>> {
+      return new Set(parse(z.array(z.string()), await kv.get(key.handled(athleteId))) ?? []);
     },
-    async setKnownActivities(athleteId: string, ids: string[]) {
-      await kv.set(key.known(athleteId), JSON.stringify(ids), { px: 14 * DAY_MS });
+    async setHandledActivities(athleteId: string, ids: string[]) {
+      await kv.set(key.handled(athleteId), JSON.stringify(ids), { px: 14 * DAY_MS });
     },
   };
 }
 
 export type Store = ReturnType<typeof createStore>;
 
-export async function sealCredentials(credentials: Credentials, expiresAt: number, now: number) {
-  const ttlSeconds = Math.ceil((expiresAt - now + DAY_MS) / 1000);
+export async function sealCredentials(credentials: Credentials, until: number, now: number) {
+  const ttlSeconds = Math.ceil((until - now + DAY_MS) / 1000);
   return encryptJwe(
     { typ: "subscription-credentials", credentials },
     getConfig().oauth.signingKey,
@@ -170,7 +214,8 @@ export async function sealCredentials(credentials: Credentials, expiresAt: numbe
   );
 }
 
-export async function openCredentials(sealed: string): Promise<Credentials | null> {
+export async function openCredentials(sealed: string | null): Promise<Credentials | null> {
+  if (!sealed) return null;
   const result = await decryptJwe<{ typ: "subscription-credentials"; credentials: unknown }>(
     sealed,
     getConfig().oauth.signingKey,

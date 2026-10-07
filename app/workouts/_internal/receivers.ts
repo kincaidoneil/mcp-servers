@@ -22,9 +22,9 @@ const ok = (followUp: string[] = []): Received => ({
   response: new Response(null, { status: 200 }),
   followUp,
 });
-const status = (code: number, message: string): Received => ({
+const status = (code: number, message: string, followUp: string[] = []): Received => ({
   response: Response.json({ error: message }, { status: code }),
-  followUp: [],
+  followUp,
 });
 
 function sameSecret(expected: string, actual: string): boolean {
@@ -44,12 +44,9 @@ export async function receiveHevyWebhook(req: Request): Promise<Received> {
   if (!body.success) return status(400, "expected {payload: {workoutId}}");
 
   const result = await ingestHevyWorkout(user, body.data.payload.workoutId);
-  if (!result.ok) {
-    // 503 asks Hevy to redeliver; anything permanent is acknowledged so Hevy
-    // stops retrying something that cannot succeed.
-    return result.retry ? status(503, result.reason) : ok();
-  }
-  return ok(result.queued);
+  // 503 asks Hevy to redeliver. Whatever was queued still goes out now, and
+  // claims keep the redelivery from queueing it twice.
+  return result.retry ? status(503, "retry later", result.queued) : ok(result.queued);
 }
 
 const IntervalsWebhookSchema = z.object({
@@ -81,11 +78,8 @@ export async function receiveIntervalsWebhook(req: Request): Promise<Received> {
         : [],
     ),
   );
-  const followUp = results.flatMap((r) => (r.ok ? r.queued : []));
-  const retry = results.some((r) => !r.ok && r.retry);
-  // Events already emitted are claimed, so a redelivery only redoes the rest.
-  if (retry) return { ...status(503, "retry later"), followUp };
-  return ok(followUp);
+  const followUp = results.flatMap((r) => r.queued);
+  return results.some((r) => r.retry) ? status(503, "retry later", followUp) : ok(followUp);
 }
 
 export async function runTick(req: Request): Promise<Response> {

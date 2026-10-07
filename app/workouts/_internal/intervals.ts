@@ -21,6 +21,42 @@ export type IntervalsResult<T> =
 const num = z.number().nullish();
 const str = z.string().nullish();
 
+const IntervalSchema = z.object({
+  type: str,
+  label: str,
+  start_time: num,
+  end_time: num,
+  moving_time: num,
+  elapsed_time: num,
+  distance: num,
+  average_speed: num,
+  gap: num,
+  average_gradient: num,
+  total_elevation_gain: num,
+  average_heartrate: num,
+  max_heartrate: num,
+  average_cadence: num,
+  average_stride: num,
+  average_watts: num,
+  zone: num,
+  intensity: num,
+});
+export type Interval = z.infer<typeof IntervalSchema>;
+
+// Intervals' own clustering of similar intervals, e.g. "5 x 206s @ 180bpm".
+const IntervalGroupSchema = z.object({
+  count: num,
+  moving_time: num,
+  elapsed_time: num,
+  distance: num,
+  average_speed: num,
+  gap: num,
+  average_heartrate: num,
+  average_cadence: num,
+  average_watts: num,
+  zone: num,
+});
+
 // Only the fields this bridge reads. Intervals returns well over a hundred.
 export const ActivitySchema = z.object({
   id: z.string(),
@@ -34,43 +70,72 @@ export const ActivitySchema = z.object({
   created: str,
   source: str,
   device_name: str,
+  trainer: z.boolean().nullish(),
+  race: z.boolean().nullish(),
   distance: num,
   moving_time: num,
   elapsed_time: num,
+  recording_stops: z.array(z.number()).nullish(),
   total_elevation_gain: num,
+  total_elevation_loss: num,
+  average_speed: num,
+  gap: num,
   average_heartrate: num,
   max_heartrate: num,
   average_cadence: num,
-  average_speed: num,
+  average_stride: num,
+  average_stance_time: num,
+  average_vertical_ratio: num,
   icu_average_watts: num,
   icu_weighted_avg_watts: num,
   icu_training_load: num,
+  hr_load_type: str,
+  trimp: num,
   icu_intensity: num,
   icu_atl: num,
   icu_ctl: num,
   icu_efficiency_factor: num,
   decoupling: num,
+  icu_hrr: z.object({ hrr: num, start_bpm: num, end_bpm: num }).nullish(),
   calories: num,
   icu_rpe: num,
+  session_rpe: num,
   feel: num,
   kg_lifted: num,
+  // The athlete's reference points as of this activity.
+  lthr: num,
+  athlete_max_hr: num,
+  threshold_pace: num,
+  icu_ftp: num,
+  icu_hr_zones: z.array(z.number()).nullish(),
   icu_hr_zone_times: z.array(z.number()).nullish(),
+  pace_zone_times: z.array(z.number()).nullish(),
+  gap_zone_times: z.array(z.number()).nullish(),
+  has_weather: z.boolean().nullish(),
+  average_weather_temp: num,
+  average_feels_like: num,
+  average_wind_speed: num,
+  headwind_percent: num,
   interval_summary: z.array(z.string()).nullish(),
-  icu_intervals: z
-    .array(
-      z.object({
-        type: str,
-        label: str,
-        moving_time: num,
-        distance: num,
-        average_heartrate: num,
-        average_watts: num,
-        average_speed: num,
-      }),
-    )
-    .nullish(),
+  icu_intervals: z.array(IntervalSchema).nullish(),
+  icu_groups: z.array(IntervalGroupSchema).nullish(),
 });
 export type Activity = z.infer<typeof ActivitySchema>;
+
+// Requested streams, sampled per recorded point. Values can be null where the
+// sensor dropped out.
+export const STREAM_TYPES = [
+  "time",
+  "distance",
+  "heartrate",
+  "cadence",
+  "watts",
+  "fixed_altitude",
+] as const;
+const StreamsSchema = z.array(
+  z.looseObject({ type: z.string(), data: z.array(z.number().nullable()).nullish() }),
+);
+export type Streams = Partial<Record<(typeof STREAM_TYPES)[number], (number | null)[]>>;
 
 const AthleteSchema = z.object({ id: z.string(), name: str });
 
@@ -143,6 +208,18 @@ export function createIntervalsClient(credential: IntervalsCredential) {
     getActivity(activityId: string) {
       return request(ActivitySchema, ["activity", activityId], { intervals: "true" });
     },
+    async getStreams(activityId: string): Promise<IntervalsResult<Streams>> {
+      const result = await request(StreamsSchema, ["activity", activityId, "streams"], {
+        types: STREAM_TYPES.join(","),
+      });
+      if (!result.ok) return result;
+      const streams: Streams = {};
+      for (const stream of result.value) {
+        const type = STREAM_TYPES.find((t) => t === stream.type);
+        if (type && stream.data) streams[type] = stream.data;
+      }
+      return { ok: true, value: streams };
+    },
   };
 }
 
@@ -150,130 +227,4 @@ export type IntervalsClient = ReturnType<typeof createIntervalsClient>;
 
 export function activityUrl(activityId: string): string {
   return `${INTERVALS_ORIGIN}/activities/${encodeURIComponent(activityId)}`;
-}
-
-interface RenderOptions {
-  units: "metric" | "imperial";
-}
-
-// Plain-text summary for the model. Skips anything the activity lacks, so a
-// strength session without GPS reads as cleanly as a run.
-export function renderActivity(a: Activity, opts: RenderOptions, detail = false): string {
-  const imperial = opts.units === "imperial";
-  const lines = [
-    `## ${a.name ?? "Activity"} — ${a.type ?? "unknown type"}, ${a.start_date_local ?? a.start_date ?? "unknown start"} (id ${a.id})`,
-  ];
-  const facts: string[] = [];
-  if (a.distance) {
-    facts.push(
-      imperial
-        ? `distance ${(a.distance / 1609.344).toFixed(2)} mi`
-        : `distance ${(a.distance / 1000).toFixed(2)} km`,
-    );
-  }
-  if (a.moving_time) facts.push(`moving ${formatDuration(a.moving_time)}`);
-  if (a.elapsed_time && a.elapsed_time !== a.moving_time) {
-    facts.push(`elapsed ${formatDuration(a.elapsed_time)}`);
-  }
-  if (a.average_speed && a.distance && isFootSport(a.type)) {
-    facts.push(`pace ${formatPace(a.average_speed, imperial)}`);
-  }
-  if (a.total_elevation_gain) {
-    facts.push(
-      imperial
-        ? `elevation +${Math.round(a.total_elevation_gain * 3.28084)} ft`
-        : `elevation +${Math.round(a.total_elevation_gain)} m`,
-    );
-  }
-  if (a.average_heartrate) {
-    facts.push(
-      `HR avg ${Math.round(a.average_heartrate)}${a.max_heartrate ? ` / max ${a.max_heartrate}` : ""}`,
-    );
-  }
-  if (a.icu_average_watts) {
-    facts.push(
-      `power avg ${Math.round(a.icu_average_watts)} W${a.icu_weighted_avg_watts ? ` / NP ${Math.round(a.icu_weighted_avg_watts)} W` : ""}`,
-    );
-  }
-  if (a.average_cadence) facts.push(`cadence ${Math.round(a.average_cadence)}`);
-  if (a.icu_training_load !== null && a.icu_training_load !== undefined) {
-    facts.push(`load ${a.icu_training_load}`);
-  }
-  if (a.icu_intensity) facts.push(`intensity ${Math.round(a.icu_intensity)}%`);
-  if (a.decoupling !== null && a.decoupling !== undefined) {
-    facts.push(`decoupling ${a.decoupling.toFixed(1)}%`);
-  }
-  if (a.icu_efficiency_factor) facts.push(`EF ${a.icu_efficiency_factor.toFixed(2)}`);
-  if (a.kg_lifted) facts.push(`lifted ${Math.round(a.kg_lifted)} kg`);
-  if (a.calories) facts.push(`${a.calories} kcal`);
-  if (a.icu_rpe) facts.push(`RPE ${a.icu_rpe}`);
-  if (a.feel) facts.push(`feel ${a.feel}/5`);
-  if (facts.length > 0) lines.push(facts.join(" · "));
-
-  if (
-    a.icu_ctl !== null &&
-    a.icu_ctl !== undefined &&
-    a.icu_atl !== null &&
-    a.icu_atl !== undefined
-  ) {
-    lines.push(
-      `fitness ${a.icu_ctl.toFixed(1)}, fatigue ${a.icu_atl.toFixed(1)}, form ${(a.icu_ctl - a.icu_atl).toFixed(1)} after this activity`,
-    );
-  }
-  if (a.icu_hr_zone_times && a.icu_hr_zone_times.some((t) => t > 0)) {
-    lines.push(
-      `time in HR zones: ${a.icu_hr_zone_times.map((t, i) => `Z${i + 1} ${formatDuration(t)}`).join(", ")}`,
-    );
-  }
-  if (a.interval_summary && a.interval_summary.length > 0) {
-    lines.push(`intervals: ${a.interval_summary.join("; ")}`);
-  }
-  if (detail && a.icu_intervals && a.icu_intervals.length > 0) {
-    lines.push(
-      ...a.icu_intervals.map((iv, i) => {
-        const parts = [`${i + 1}. ${iv.label ?? iv.type ?? "interval"}`];
-        if (iv.moving_time) parts.push(formatDuration(iv.moving_time));
-        if (iv.distance) {
-          parts.push(
-            imperial
-              ? `${(iv.distance / 1609.344).toFixed(2)} mi`
-              : `${(iv.distance / 1000).toFixed(2)} km`,
-          );
-        }
-        if (iv.average_speed && isFootSport(a.type))
-          parts.push(formatPace(iv.average_speed, imperial));
-        if (iv.average_watts) parts.push(`${Math.round(iv.average_watts)} W`);
-        if (iv.average_heartrate) parts.push(`${Math.round(iv.average_heartrate)} bpm`);
-        return parts.join(" · ");
-      }),
-    );
-  }
-  if (a.device_name) lines.push(`device: ${a.device_name}`);
-  if (a.description) lines.push(a.description);
-  return lines.join("\n");
-}
-
-function isFootSport(type: string | null | undefined): boolean {
-  return (
-    type === "Run" ||
-    type === "TrailRun" ||
-    type === "VirtualRun" ||
-    type === "Walk" ||
-    type === "Hike"
-  );
-}
-
-function formatDuration(seconds: number): string {
-  const s = Math.round(seconds);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const rest = s % 60;
-  return h > 0 ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m${String(rest).padStart(2, "0")}s`;
-}
-
-function formatPace(metersPerSecond: number, imperial: boolean): string {
-  const secondsPerUnit = Math.round((imperial ? 1609.344 : 1000) / metersPerSecond);
-  const m = Math.floor(secondsPerUnit / 60);
-  const s = secondsPerUnit % 60;
-  return `${m}:${String(s).padStart(2, "0")}/${imperial ? "mi" : "km"}`;
 }

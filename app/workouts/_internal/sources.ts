@@ -5,12 +5,19 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { createHevyClient } from "@/app/hevy/_internal/client";
 import { renderWorkout } from "@/app/hevy/_internal/render";
 import { getConfig } from "./config";
-import type { Credentials, Principal } from "./credentials";
+import { isAllowed, type Credentials, type Principal } from "./credentials";
 import { getDeps } from "./deps";
 import { emit } from "./events/dispatch";
 import { WORKOUT_COMPLETED, type McpEvent } from "./events/schema";
 import { openCredentials, type SubscriptionRecord } from "./events/store";
-import { activityUrl, createIntervalsClient, renderActivity, type Activity } from "./intervals";
+import {
+  activityUrl,
+  createIntervalsClient,
+  type Activity,
+  type IntervalsClient,
+  type Streams,
+} from "./intervals";
+import { renderActivity } from "./render-activity";
 
 // ---- Hevy webhook registration ----
 
@@ -31,11 +38,16 @@ export function hevyWebhookToken(hevyUserId: string): string {
   return `Bearer ${mac}`;
 }
 
+// Hevy documents sending authToken verbatim as the Authorization header; also
+// accept it with a second "Bearer " in case Hevy adds its own prefix.
 export function checkHevyWebhookAuth(hevyUserId: string, header: string | null): boolean {
   if (!header) return false;
-  const expected = Buffer.from(hevyWebhookToken(hevyUserId));
-  const actual = Buffer.from(header);
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  const token = hevyWebhookToken(hevyUserId);
+  return [token, `Bearer ${token}`].some((expected) => {
+    const a = Buffer.from(expected);
+    const b = Buffer.from(header);
+    return a.length === b.length && timingSafeEqual(a, b);
+  });
 }
 
 export type EnsureWebhookResult = { ok: true } | { ok: false; reason: string };
@@ -49,7 +61,10 @@ export async function ensureHevyWebhook(principal: Principal): Promise<EnsureWeb
 
   const current = await client.getWebhookSubscription();
   if (current.ok) {
-    if (current.value.url === url && current.value.auth_token === authToken) return { ok: true };
+    // Hevy may omit or mask the token on reads; the URL alone is then proof
+    // enough that it is ours and current.
+    const tokenMatches = !current.value.auth_token || current.value.auth_token === authToken;
+    if (current.value.url === url && tokenMatches) return { ok: true };
     const ours = current.value.url.startsWith(`${getConfig().oauth.baseUrl}${HEVY_WEBHOOK_PATH}`);
     if (!ours) {
       return {
@@ -66,10 +81,15 @@ export async function ensureHevyWebhook(principal: Principal): Promise<EnsureWeb
     return { ok: false, reason: `Could not read the Hevy webhook (${current.code}).` };
   }
 
-  const created = await client.createWebhookSubscription({ url, authToken });
+  // One retry: after a delete, a failed create would leave no webhook at all.
+  let created = await client.createWebhookSubscription({ url, authToken });
+  if (!created.ok) created = await client.createWebhookSubscription({ url, authToken });
   return created.ok
     ? { ok: true }
-    : { ok: false, reason: `Could not register the Hevy webhook (${created.code}).` };
+    : {
+        ok: false,
+        reason: `Could not register the Hevy webhook (${created.code}); no Hevy webhook is set now.`,
+      };
 }
 
 function safeHost(url: string): string {
@@ -107,10 +127,19 @@ export async function hevyEvent(credentials: Credentials, workoutId: string) {
     },
     cursor: null,
   };
-  return { ok: true as const, value: event };
+  // When the workout reached Hevy, which decides which subscriptions it is
+  // news to.
+  const createdAt = Date.parse(w.created_at ?? "") || (end ?? start).getTime();
+  return { ok: true as const, value: { event, createdAt } };
 }
 
-export function intervalsEvent(a: Activity): McpEvent {
+// When the activity reached Intervals, which decides which subscriptions it
+// is news to.
+export function activityCreatedAt(a: Activity, fallback: number): number {
+  return Date.parse(a.created ?? a.analyzed ?? "") || fallback;
+}
+
+export function intervalsEvent(a: Activity, streams: Streams | null): McpEvent {
   const start = a.start_date ? new Date(a.start_date) : null;
   const elapsed = a.elapsed_time ?? a.moving_time ?? null;
   const end = start && elapsed ? new Date(start.getTime() + elapsed * 1000) : null;
@@ -126,7 +155,7 @@ export function intervalsEvent(a: Activity): McpEvent {
       start_time: (start ?? new Date(a.created ?? Date.now())).toISOString(),
       duration_seconds: elapsed,
       url: activityUrl(a.id),
-      summary: renderActivity(a, getConfig().display, true),
+      summary: renderActivity(a, getConfig().display, streams),
     },
     cursor: null,
   };
@@ -134,90 +163,117 @@ export function intervalsEvent(a: Activity): McpEvent {
 
 // ---- Ingest ----
 
-export type IngestResult =
-  | { ok: true; queued: string[] }
-  // retry: the upstream should redeliver (answer it with a 5xx).
-  | { ok: false; retry: boolean; reason: string };
-
-// Any live subscription's sealed credentials will do: they all belong to the
-// same account.
-async function credentialsFrom(subs: SubscriptionRecord[]): Promise<Credentials | null> {
-  for (const sub of subs) {
-    // oxlint-disable-next-line no-await-in-loop -- stop at the first that opens
-    const credentials = await openCredentials(sub.sealedCredentials);
-    if (credentials) return credentials;
-  }
-  return null;
+export interface IngestResult {
+  queued: string[];
+  // The upstream should redeliver (answer it with a 5xx). Accounts that did
+  // succeed are claimed, so a redelivery only redoes the rest.
+  retry: boolean;
 }
 
-function allowed(sub: SubscriptionRecord): boolean {
-  const { allowlist } = getConfig();
-  return (
-    allowlist.hevyUserIds.includes(sub.hevyUserId) &&
-    allowlist.intervalsAthleteIds.includes(sub.intervalsAthleteId)
-  );
-}
-
-// Subscriptions whose account left the allowlist, or whose upstream key was
-// rejected, are deleted rather than skipped forever.
-async function liveSubscriptions(
-  index: { kind: "hevy"; hevyUserId: string } | { kind: "intervals"; athleteId: string },
-  source: "hevy" | "intervals",
-): Promise<SubscriptionRecord[]> {
+// Run `fn` once per account among the subscriptions, with that account's
+// current credentials. Subscriptions whose account left the allowlist, or
+// whose upstream key is rejected, are deleted.
+async function perAccount(
+  subs: SubscriptionRecord[],
+  fn: (
+    credentials: Credentials,
+    subs: SubscriptionRecord[],
+  ) => Promise<{ queued: string[]; retry: boolean; revoke?: boolean }>,
+): Promise<IngestResult> {
   const { store } = getDeps();
-  const subs = await store.listSubscriptions(index);
-  const revoked = subs.filter((s) => !allowed(s));
+  const revoked = subs.filter((s) => !isAllowed(s));
   await Promise.all(revoked.map((s) => store.deleteSubscription(s)));
-  return subs.filter(
-    (s) => allowed(s) && (!s.arguments.sources || s.arguments.sources.includes(source)),
+
+  const accounts = new Map<string, SubscriptionRecord[]>();
+  for (const sub of subs.filter((s) => isAllowed(s))) {
+    accounts.set(sub.principalId, [...(accounts.get(sub.principalId) ?? []), sub]);
+  }
+  const results = await Promise.allSettled(
+    [...accounts].map(async ([principalId, group]) => {
+      const credentials = await openCredentials(await store.getCredentials(principalId));
+      // Unreadable credentials (expired, or JWT_SIGNING_KEY rotated) cannot
+      // recover; the client's next refresh writes fresh ones.
+      if (!credentials) return { queued: [], retry: false };
+      const result = await fn(credentials, group);
+      if (result.revoke) await Promise.all(group.map((s) => store.deleteSubscription(s)));
+      return result;
+    }),
   );
+  return {
+    queued: results.flatMap((r) => (r.status === "fulfilled" ? r.value.queued : [])),
+    retry: results.some((r) => r.status === "rejected" || r.value.retry),
+  };
 }
 
-async function revokeAll(subs: SubscriptionRecord[]) {
-  const { store } = getDeps();
-  await Promise.all(subs.map((s) => store.deleteSubscription(s)));
+function wantsSource(source: "hevy" | "intervals") {
+  return (s: SubscriptionRecord) => !s.arguments.sources || s.arguments.sources.includes(source);
 }
 
 export async function ingestHevyWorkout(
   hevyUserId: string,
   workoutId: string,
 ): Promise<IngestResult> {
-  const subs = await liveSubscriptions({ kind: "hevy", hevyUserId }, "hevy");
-  if (subs.length === 0) return { ok: true, queued: [] };
-  const credentials = await credentialsFrom(subs);
-  if (!credentials) return { ok: false, retry: false, reason: "no usable credentials" };
-
-  const built = await hevyEvent(credentials, workoutId);
-  if (!built.ok) {
-    if (built.code === "unauthorized") {
-      await revokeAll(subs);
-      return { ok: false, retry: false, reason: "Hevy rejected the stored API key" };
+  const { store } = getDeps();
+  const subs = (await store.listSubscriptions({ kind: "hevy", hevyUserId })).filter(
+    wantsSource("hevy"),
+  );
+  return perAccount(subs, async (credentials, group) => {
+    const built = await hevyEvent(credentials, workoutId);
+    if (built.ok) {
+      return { queued: await emit(built.value.event, built.value.createdAt, group), retry: false };
     }
-    if (built.code === "not_found") return { ok: true, queued: [] };
-    return { ok: false, retry: true, reason: `Hevy fetch failed (${built.code})` };
-  }
-  return { ok: true, queued: await emit(built.value, subs) };
+    // not_found can mean the webhook beat the workout to Hevy's read path.
+    return {
+      queued: [],
+      retry: built.code !== "unauthorized",
+      revoke: built.code === "unauthorized",
+    };
+  });
 }
 
 export async function ingestIntervalsActivity(
   athleteId: string,
   activityId: string,
 ): Promise<IngestResult> {
-  const subs = await liveSubscriptions({ kind: "intervals", athleteId }, "intervals");
-  if (subs.length === 0) return { ok: true, queued: [] };
-  const credentials = await credentialsFrom(subs);
-  if (!credentials) return { ok: false, retry: false, reason: "no usable credentials" };
-
-  const result = await createIntervalsClient(credentials.intervals).getActivity(activityId);
-  if (!result.ok) {
-    if (result.code === "unauthorized") {
-      await revokeAll(subs);
-      return { ok: false, retry: false, reason: "Intervals rejected the stored credential" };
+  const { store, now } = getDeps();
+  const subs = (await store.listSubscriptions({ kind: "intervals", athleteId })).filter(
+    wantsSource("intervals"),
+  );
+  return perAccount(subs, async (credentials, group) => {
+    const result = await fetchActivity(createIntervalsClient(credentials.intervals), activityId);
+    if (result.ok) {
+      const { activity, streams } = result.value;
+      return {
+        queued: await emit(
+          intervalsEvent(activity, streams),
+          activityCreatedAt(activity, now()),
+          group,
+        ),
+        retry: false,
+      };
     }
-    if (result.code === "not_found") return { ok: true, queued: [] };
-    return { ok: false, retry: true, reason: `Intervals fetch failed (${result.code})` };
-  }
-  return { ok: true, queued: await emit(intervalsEvent(result.value), subs) };
+    // A deleted activity has nothing to send.
+    if (result.code === "not_found") return { queued: [], retry: false };
+    return {
+      queued: [],
+      retry: result.code !== "unauthorized",
+      revoke: result.code === "unauthorized",
+    };
+  });
+}
+
+// The activity with interval detail, plus its streams for splits. Splits are
+// a nice-to-have, so a streams failure only drops them.
+export async function fetchActivity(client: IntervalsClient, activityId: string) {
+  const [activity, streams] = await Promise.all([
+    client.getActivity(activityId),
+    client.getStreams(activityId),
+  ]);
+  if (!activity.ok) return activity;
+  return {
+    ok: true as const,
+    value: { activity: activity.value, streams: streams.ok ? streams.value : null },
+  };
 }
 
 // ---- Intervals polling ----
@@ -227,59 +283,59 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // regardless, so one that never gets analyzed still arrives.
 const ANALYSIS_GRACE_MS = 10 * 60 * 1000;
 
-function shouldPoll(credentials: Credentials): boolean {
-  return credentials.intervals.kind === "api_key" || getConfig().intervalsWebhookSecret === null;
-}
-
-// Find activities that appeared since the last poll for every athlete with a
-// polling-mode subscription. Returns the outbox members queued.
+// Look for new activities for every athlete with an Intervals subscription.
+// Runs even when Intervals webhooks are on, as a backstop for missed or
+// never-sent webhooks; claims keep the two paths from double-delivering.
 export async function pollIntervals(): Promise<string[]> {
   const { store } = getDeps();
   const all = await store.listSubscriptions({ kind: "all" });
   const athletes = [...new Set(all.map((s) => s.intervalsAthleteId))];
-  return (await Promise.all(athletes.map(pollAthlete))).flat();
+  const results = await Promise.all(athletes.map(pollAthlete));
+  return results.flatMap((r) => r.queued);
 }
 
-async function pollAthlete(athleteId: string): Promise<string[]> {
+async function pollAthlete(athleteId: string): Promise<IngestResult> {
   const { store, now } = getDeps();
-  const subs = await liveSubscriptions({ kind: "intervals", athleteId }, "intervals");
-  if (subs.length === 0) return [];
-  const credentials = await credentialsFrom(subs);
-  if (!credentials || !shouldPoll(credentials)) return [];
-
-  const client = createIntervalsClient(credentials.intervals);
-  const listed = await client.listActivities(isoDate(now() - 7 * DAY_MS), isoDate(now() + DAY_MS));
-  if (!listed.ok) {
-    if (listed.code === "unauthorized") await revokeAll(subs);
-    return [];
-  }
-
-  const ready = listed.value.filter(
-    (a) => a.analyzed || (a.created && Date.parse(a.created) < now() - ANALYSIS_GRACE_MS),
+  const subs = (await store.listSubscriptions({ kind: "intervals", athleteId })).filter(
+    wantsSource("intervals"),
   );
-  // First poll for this athlete: everything created before the oldest
-  // subscription is history, not news.
-  const firstSubscribed = Math.min(...subs.map((s) => s.createdAt));
-  const known = new Set(
-    (await store.getKnownActivities(athleteId)) ??
-      ready.filter((a) => a.created && Date.parse(a.created) < firstSubscribed).map((a) => a.id),
-  );
-
-  const fresh = ready.filter((a) => !known.has(a.id));
-  const queued = await Promise.all(
-    fresh.map(async (activity) => {
-      // The list omits per-interval detail; fall back to the list row.
-      const full = await client.getActivity(activity.id);
-      return emit(intervalsEvent(full.ok ? full.value : activity), subs);
-    }),
-  );
-  for (const activity of fresh) known.add(activity.id);
-  // Only ids still inside the window can come back, so drop the rest.
-  await store.setKnownActivities(
-    athleteId,
-    listed.value.map((a) => a.id).filter((id) => known.has(id)),
-  );
-  return queued.flat();
+  return perAccount(subs, async (credentials, group) => {
+    const client = createIntervalsClient(credentials.intervals);
+    const listed = await client.listActivities(
+      isoDate(now() - 7 * DAY_MS),
+      isoDate(now() + DAY_MS),
+    );
+    if (!listed.ok) {
+      return { queued: [], retry: false, revoke: listed.code === "unauthorized" };
+    }
+    const handled = await store.getHandledActivities(athleteId);
+    const oldestSubscription = Math.min(...group.map((s) => s.createdAt));
+    const ready = listed.value.filter(
+      (a) => a.analyzed || activityCreatedAt(a, now()) < now() - ANALYSIS_GRACE_MS,
+    );
+    // Only activities newer than some subscription can be news; skip fetching
+    // details for the rest.
+    const fresh = ready.filter(
+      (a) => !handled.has(a.id) && activityCreatedAt(a, now()) >= oldestSubscription,
+    );
+    const queued = await Promise.all(
+      fresh.map(async (activity) => {
+        // The list omits intervals and streams; fall back to the list row.
+        const full = await fetchActivity(client, activity.id);
+        const event = full.ok
+          ? intervalsEvent(full.value.activity, full.value.streams)
+          : intervalsEvent(activity, null);
+        return emit(event, activityCreatedAt(activity, now()), group);
+      }),
+    );
+    for (const activity of ready) handled.add(activity.id);
+    // Only ids still inside the window can come back, so drop the rest.
+    await store.setHandledActivities(
+      athleteId,
+      listed.value.map((a) => a.id).filter((id) => handled.has(id)),
+    );
+    return { queued: queued.flat(), retry: false };
+  });
 }
 
 function isoDate(ms: number): string {

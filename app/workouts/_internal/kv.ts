@@ -3,6 +3,17 @@
 
 import { Redis } from "@upstash/redis";
 
+export interface EnqueueOnce {
+  claimKey: string;
+  claimPx: number;
+  itemKey: string;
+  item: string;
+  itemPx: number;
+  zsetKey: string;
+  score: number;
+  member: string;
+}
+
 export interface Kv {
   get(key: string): Promise<string | null>;
   // Returns false when `nx` is set and the key already existed.
@@ -13,9 +24,22 @@ export interface Kv {
   smembers(key: string): Promise<string[]>;
   zadd(key: string, score: number, member: string): Promise<void>;
   zrem(key: string, member: string): Promise<void>;
+  zscore(key: string, member: string): Promise<number | null>;
   // Members with score <= max, lowest score first.
   zrangeByScore(key: string, max: number, limit: number): Promise<string[]>;
+  // Atomically: take the claim, and only if it was free, write the item and
+  // schedule it. Returns whether the claim was taken. A crash can therefore
+  // never leave a claim without its queued item, or the reverse.
+  enqueueOnce(op: EnqueueOnce): Promise<boolean>;
 }
+
+const ENQUEUE_ONCE = `
+if redis.call('SET', KEYS[1], '1', 'NX', 'PX', ARGV[1]) then
+  redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+  redis.call('ZADD', KEYS[3], ARGV[4], ARGV[5])
+  return 1
+end
+return 0`;
 
 export function upstashKv(): Kv {
   // The Vercel Marketplace integration injects KV_REST_API_*; a direct Upstash
@@ -59,8 +83,20 @@ export function upstashKv(): Kv {
     async zrem(key, member) {
       await redis.zrem(key, member);
     },
+    async zscore(key, member) {
+      const score = await redis.zscore(key, member);
+      return score === null ? null : Number(score);
+    },
     zrangeByScore: (key, max, limit) =>
       redis.zrange<string[]>(key, "-inf", max, { byScore: true, offset: 0, count: limit }),
+    async enqueueOnce(op) {
+      const taken = await redis.eval<string[], number | string>(
+        ENQUEUE_ONCE,
+        [op.claimKey, op.itemKey, op.zsetKey],
+        [String(op.claimPx), op.item, String(op.itemPx), String(op.score), op.member],
+      );
+      return Number(taken) === 1;
+    },
   };
 }
 
@@ -79,7 +115,7 @@ export function memoryKv(now: () => number = Date.now): Kv {
     return entry;
   }
 
-  return {
+  const kv: Kv = {
     async get(key) {
       return live(key)?.value ?? null;
     },
@@ -110,6 +146,9 @@ export function memoryKv(now: () => number = Date.now): Kv {
     async zrem(key, member) {
       zsets.get(key)?.delete(member);
     },
+    async zscore(key, member) {
+      return zsets.get(key)?.get(member) ?? null;
+    },
     async zrangeByScore(key, max, limit) {
       return [...(zsets.get(key) ?? [])]
         .filter(([, score]) => score <= max)
@@ -117,5 +156,12 @@ export function memoryKv(now: () => number = Date.now): Kv {
         .slice(0, limit)
         .map(([member]) => member);
     },
+    async enqueueOnce(op) {
+      if (!(await kv.set(op.claimKey, "1", { px: op.claimPx, nx: true }))) return false;
+      await kv.set(op.itemKey, op.item, { px: op.itemPx });
+      await kv.zadd(op.zsetKey, op.score, op.member);
+      return true;
+    },
   };
+  return kv;
 }

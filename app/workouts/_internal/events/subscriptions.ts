@@ -21,7 +21,12 @@ const MAX_TTL_MS = 30 * 24 * HOUR_MS;
 // How long a replaced signing secret keeps signing alongside the new one.
 const ROTATION_WINDOW_MS = 10 * 60 * 1000;
 
+// Each subscription is one callback URL and filter; nobody needs more, and a
+// cap bounds the fan-out of every workout.
+const MAX_SUBSCRIPTIONS_PER_ACCOUNT = 10;
+
 const INVALID_PARAMS = -32602;
+const NOT_FOUND = -32011;
 const SERVER_ERROR = -32603;
 
 export type RpcFailure = { ok: false; code: number; message: string; data?: unknown };
@@ -69,7 +74,7 @@ export async function subscribe(
   const { store, callbackFetch, now } = getDeps();
 
   if (params.name !== WORKOUT_COMPLETED) {
-    return { ok: false, code: INVALID_PARAMS, message: `Unknown event: ${params.name}` };
+    return { ok: false, code: NOT_FOUND, message: `Unknown event: ${params.name}` };
   }
   const args = SubscriptionArgumentsSchema.safeParse(params.arguments ?? {});
   if (!args.success) {
@@ -83,7 +88,17 @@ export async function subscribe(
 
   // Identity uses the URL exactly as sent, so unsubscribe finds it again.
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
-  const existing = await store.getSubscription(id);
+  const existing = await store.readSubscription(id);
+  if (!existing) {
+    const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
+    if (live.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
+      return {
+        ok: false,
+        code: SERVER_ERROR,
+        message: `This account already has ${live.length} subscriptions; unsubscribe one first.`,
+      };
+    }
+  }
 
   const verifiedKey = digest([principal.id, params.delivery.url]);
   if (!(await store.isCallbackVerified(verifiedKey))) {
@@ -117,13 +132,19 @@ export async function subscribe(
     principalId: principal.id,
     hevyUserId: principal.identity.hevyUserId,
     intervalsAthleteId: principal.identity.intervalsAthleteId,
-    sealedCredentials: await sealCredentials(principal.credentials, expiresAt, at),
     arguments: args.data,
     url: url.url,
     secrets: nextSecrets(existing, secret, at),
     createdAt: existing?.createdAt ?? at,
     expiresAt,
   };
+  // The newest credentials serve every subscription on the account.
+  const credentialsUntil = at + MAX_TTL_MS;
+  await store.putCredentials(
+    principal.id,
+    await sealCredentials(principal.credentials, credentialsUntil, at),
+    credentialsUntil,
+  );
   await store.putSubscription(record);
 
   return {
@@ -156,7 +177,17 @@ function nextSecrets(
 export async function unsubscribe(principal: Principal, params: UnsubscribeParams) {
   const { store } = getDeps();
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
-  const existing = await store.getSubscription(id);
+  const existing = await store.readSubscription(id);
+  if (!existing) {
+    const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
+    if (live.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
+      return {
+        ok: false,
+        code: SERVER_ERROR,
+        message: `This account already has ${live.length} subscriptions; unsubscribe one first.`,
+      };
+    }
+  }
   // A subscription id only matches when it was created by this principal, so
   // there is nothing else to authorize.
   if (existing) await store.deleteSubscription(existing);

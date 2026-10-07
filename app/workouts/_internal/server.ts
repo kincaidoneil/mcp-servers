@@ -25,7 +25,9 @@ import {
   SubscribeResultSchema,
 } from "./events/schema";
 import { subscribe, unsubscribe } from "./events/subscriptions";
-import { createIntervalsClient, renderActivity } from "./intervals";
+import { createIntervalsClient } from "./intervals";
+import { activityLine, renderActivity } from "./render-activity";
+import { fetchActivity } from "./sources";
 
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 const failure = (value: string) => ({ ...text(value), isError: true });
@@ -57,16 +59,17 @@ function registerTools(server: McpServer, principal: Principal) {
     {
       title: "Get an Intervals.icu activity",
       description:
-        "Fetch one Intervals.icu activity by id (e.g. i194509836) with its metrics and every interval. Use the workout_id from a workout.completed event.",
+        "Fetch one Intervals.icu activity by id (e.g. i194509836) for analysis: totals, the athlete's thresholds and HR zones, load and fitness after the activity, efficiency (decoupling, HR recovery), running form, every detected interval with pace, grade-adjusted pace, grade and HR, and per-mile splits from the recorded streams. A workout.completed event already carries this same text in its summary.",
       inputSchema: z.object({ activity_id: z.string().regex(/^i?\d+$/) }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ activity_id }) => {
-      const result = await createIntervalsClient(principal.credentials.intervals).getActivity(
+      const result = await fetchActivity(
+        createIntervalsClient(principal.credentials.intervals),
         activity_id,
       );
       return result.ok
-        ? text(renderActivity(result.value, display(), true))
+        ? text(renderActivity(result.value.activity, display(), result.value.streams))
         : failure(`Intervals returned ${result.code}: ${result.message}`);
     },
   );
@@ -110,16 +113,7 @@ function registerTools(server: McpServer, principal: Principal) {
       }
       if (intervals.ok) {
         for (const a of intervals.value) {
-          const parts = [
-            a.start_date ?? a.start_date_local ?? "?",
-            "intervals",
-            `${a.name ?? "Activity"} (${a.type ?? "?"})`,
-          ];
-          if (a.moving_time) parts.push(`${Math.round(a.moving_time / 60)} min`);
-          if (a.icu_training_load !== null && a.icu_training_load !== undefined)
-            parts.push(`load ${a.icu_training_load}`);
-          parts.push(`id ${a.id}`);
-          rows.push({ at: Date.parse(a.start_date ?? "") || 0, line: parts.join(" · ") });
+          rows.push({ at: Date.parse(a.start_date ?? "") || 0, line: activityLine(a, display()) });
         }
       } else {
         notes.push(`Intervals unavailable (${intervals.code}).`);

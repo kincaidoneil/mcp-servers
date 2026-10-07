@@ -1,5 +1,5 @@
-// From "a workout exists" to signed POSTs: claim the event once, queue one
-// outbox item per matching subscription, and deliver with bounded retries.
+// From "a workout exists" to signed POSTs: queue one outbox item per matching
+// subscription (at most once each), then deliver with bounded retries.
 
 import { getDeps } from "../deps";
 import { MAX_EVENT_BYTES, postSigned } from "./callback";
@@ -7,37 +7,53 @@ import type { McpEvent } from "./schema";
 import type { SubscriptionRecord } from "./store";
 
 const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
 // Delay before attempt n+1 after n failures. The tick runs every few minutes,
 // so shorter steps would only round up to the next tick anyway.
 const BACKOFF_MS = [1, 5, 15, 60, 180, 360].map((m) => m * MINUTE_MS);
 const MAX_ATTEMPTS = BACKOFF_MS.length + 1;
+// Re-analysis or a late upload can surface old workouts; they are not news.
+const MAX_WORKOUT_AGE_MS = 7 * DAY_MS;
 
-export function wantsEvent(sub: SubscriptionRecord, event: McpEvent): boolean {
-  return !sub.arguments.sources || sub.arguments.sources.includes(event.data.source);
+// Whether a subscription should hear about a workout created at `createdAt`
+// (when it reached Hevy or Intervals). Workouts from before the subscription
+// existed are history, whatever path brings them in.
+export function wantsEvent(sub: SubscriptionRecord, event: McpEvent, createdAt: number): boolean {
+  return (
+    createdAt >= sub.createdAt &&
+    (!sub.arguments.sources || sub.arguments.sources.includes(event.data.source))
+  );
 }
 
-// Queue an event for every matching subscription, once per event id. Returns
-// the outbox members to attempt right away.
-export async function emit(event: McpEvent, subs: SubscriptionRecord[]): Promise<string[]> {
-  const { store } = getDeps();
-  const matching = subs.filter((s) => wantsEvent(s, event));
-  if (matching.length === 0) return [];
-  if (!(await store.claimEmission(event.eventId))) return [];
-  try {
-    return await Promise.all(matching.map((s) => store.enqueue(s.id, event)));
-  } catch (err) {
-    // Nothing durable was queued, so let the upstream retry emit it again.
-    await store.releaseEmission(event.eventId);
-    throw err;
-  }
+// Queue an event for every subscription that wants it and has not had it yet.
+// Returns the outbox members to attempt right away.
+export async function emit(
+  event: McpEvent,
+  createdAt: number,
+  subs: SubscriptionRecord[],
+): Promise<string[]> {
+  const { store, now } = getDeps();
+  if (createdAt < now() - MAX_WORKOUT_AGE_MS) return [];
+  const queued = await Promise.all(
+    subs.filter((s) => wantsEvent(s, event, createdAt)).map((s) => store.enqueueOnce(s.id, event)),
+  );
+  return queued.filter((m): m is string => m !== null);
 }
 
-export type DeliveryResult = "delivered" | "retrying" | "dropped" | "subscription_gone" | "busy";
+export type DeliveryResult =
+  | "delivered"
+  | "retrying"
+  | "dropped"
+  | "subscription_gone"
+  | "busy"
+  | "error";
 
 export async function deliver(member: string): Promise<DeliveryResult> {
   const { store, callbackFetch, now } = getDeps();
   if (!(await store.lease(member))) return "busy";
   try {
+    // Another attempt may have just failed and rescheduled this item.
+    if (!(await store.isDue(member))) return "busy";
     const item = await store.getOutboxItem(member);
     const subscriptionId = member.split(" ")[0] ?? "";
     const sub = item ? await store.getSubscription(subscriptionId) : null;
@@ -63,14 +79,13 @@ export async function deliver(member: string): Promise<DeliveryResult> {
       await store.removeOutbox(member);
       return "delivered";
     }
-    if (outcome.kind === "rejected" && outcome.status === 410) {
-      // The receiver says this subscription no longer exists.
-      await store.removeOutbox(member);
-      await store.deleteSubscription(sub);
-      return "subscription_gone";
-    }
     const attempts = item.attempts + 1;
-    if ((outcome.kind === "rejected" && outcome.status === 413) || attempts >= MAX_ATTEMPTS) {
+    // 410: the receiver does not want this delivery (stale, already handled).
+    // 413: too large. Neither is retried; the subscription carries on.
+    const final =
+      (outcome.kind === "rejected" && (outcome.status === 410 || outcome.status === 413)) ||
+      attempts >= MAX_ATTEMPTS;
+    if (final) {
       await store.removeOutbox(member);
       return "dropped";
     }
@@ -85,8 +100,11 @@ export async function deliver(member: string): Promise<DeliveryResult> {
   }
 }
 
+// Attempt every member; one failure (a Redis hiccup, a bad record) never
+// stops the rest.
 export async function deliverAll(members: string[]): Promise<DeliveryResult[]> {
-  return Promise.all(members.map(deliver));
+  const settled = await Promise.allSettled(members.map(deliver));
+  return settled.map((r) => (r.status === "fulfilled" ? r.value : "error"));
 }
 
 export async function drainOutbox(limit = 50): Promise<DeliveryResult[]> {

@@ -68,7 +68,7 @@ export function eventDefinitions() {
 
 // JSON-RPC params. Envelope fields (_meta) pass through untouched.
 
-export const ListEventsParamsSchema = z.looseObject({ cursor: z.string().optional() });
+export const ListEventsParamsSchema = z.looseObject({ cursor: z.string().nullable().optional() });
 
 export const SubscribeParamsSchema = z.looseObject({
   name: z.string(),

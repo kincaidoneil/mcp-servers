@@ -5,17 +5,16 @@ export const SERVICE_PATH = "/workouts";
 
 export interface WorkoutsConfig {
   oauth: OAuthConfig;
-  allowlist: {
-    hevyUserIds: string[];
-    intervalsAthleteIds: string[];
-  };
+  // Accounts allowed to connect, each an explicit (Hevy user, Intervals
+  // athlete) pair, so nobody can combine their Hevy with someone else's
+  // Intervals.
+  accounts: { hevyUserId: string; intervalsAthleteId: string }[];
   // Set once an Intervals.icu OAuth app exists. The consent screen then sends
   // the user through Intervals OAuth instead of asking for an API key, which
   // is what makes the athlete eligible for the app's webhooks.
   intervalsOAuth: { clientId: string; clientSecret: string } | null;
-  // The secret configured on the Intervals app's webhook. While it is unset,
-  // the tick polls every connected athlete; once set, OAuth-connected athletes
-  // are served by webhooks alone.
+  // The secret configured on the Intervals app's webhook. Webhooks only make
+  // delivery faster: the tick keeps polling as a backstop either way.
   intervalsWebhookSecret: string | null;
   // Bearer secret the scheduler (QStash, or Vercel Cron) sends to /workouts/tick.
   tickSecret: string;
@@ -38,20 +37,23 @@ export function resetConfigCacheForTesting() {
 }
 
 function loadConfig(): WorkoutsConfig {
-  const hevyUserIds = parseList(process.env["ALLOWED_HEVY_USER_IDS"]);
-  const intervalsAthleteIds = parseList(process.env["ALLOWED_INTERVALS_ATHLETE_IDS"]).map(
-    normalizeAthleteId,
-  );
-  if (hevyUserIds.length === 0 || intervalsAthleteIds.length === 0) {
-    throw new Error("ALLOWED_HEVY_USER_IDS and ALLOWED_INTERVALS_ATHLETE_IDS must both be set.");
-  }
+  const accounts = parseList(process.env["ALLOWED_WORKOUT_ACCOUNTS"]).map((pair) => {
+    const [hevyUserId, athleteId, ...rest] = pair.split(":");
+    if (!hevyUserId || !athleteId || rest.length > 0) {
+      throw new Error(
+        `ALLOWED_WORKOUT_ACCOUNTS entry "${pair}" is not hevyUserId:intervalsAthleteId.`,
+      );
+    }
+    return { hevyUserId, intervalsAthleteId: normalizeAthleteId(athleteId) };
+  });
+  if (accounts.length === 0) throw new Error("ALLOWED_WORKOUT_ACCOUNTS must be set.");
 
   const clientId = process.env["INTERVALS_OAUTH_CLIENT_ID"];
   const clientSecret = process.env["INTERVALS_OAUTH_CLIENT_SECRET"];
 
   return {
     oauth: loadOAuthConfigFromEnv(SERVICE_PATH),
-    allowlist: { hevyUserIds, intervalsAthleteIds },
+    accounts,
     intervalsOAuth: clientId && clientSecret ? { clientId, clientSecret } : null,
     intervalsWebhookSecret: process.env["INTERVALS_WEBHOOK_SECRET"] || null,
     tickSecret: requiredEnv("WORKOUTS_TICK_SECRET"),

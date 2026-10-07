@@ -7,7 +7,10 @@ import net from "node:net";
 import { Webhook } from "standardwebhooks";
 import { Agent, fetch as undiciFetch } from "undici";
 
+// text() yields at most the first few KB: nothing this server needs from a
+// callback is larger, and an endless body must not exhaust memory.
 export type CallbackResponse = { status: number; text(): Promise<string> };
+const MAX_RESPONSE_BYTES = 4096;
 
 // The one seam tests replace: production pins every connection to a vetted
 // public address; tests deliver to an in-process receiver.
@@ -40,7 +43,8 @@ for (const [prefix, bits] of [
   blocked.addSubnet(prefix, bits, "ipv4");
 }
 for (const [prefix, bits] of [
-  ["::", 127], // :: and ::1
+  ["::", 96], // ::, ::1, and IPv4-compatible ::a.b.c.d
+  ["::ffff:0:0:0", 96], // SIIT-translated IPv4
   ["64:ff9b::", 96],
   ["64:ff9b:1::", 48],
   ["100::", 64],
@@ -121,8 +125,36 @@ export function createSafeCallbackFetch(): CallbackFetch {
       body: init.body,
       signal: init.signal,
     });
-    return { status: response.status, text: () => response.text() };
+    const head = await readHead(response.body, MAX_RESPONSE_BYTES);
+    return { status: response.status, text: async () => head };
   };
+}
+
+// Typed by shape: undici's stream type differs from the DOM one.
+interface ByteStream {
+  getReader(): {
+    read(): Promise<{ done: boolean; value?: Uint8Array }>;
+    cancel(): Promise<void>;
+  };
+}
+
+async function readHead(body: ByteStream | null, limit: number): Promise<string> {
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (size < limit) {
+      // oxlint-disable-next-line no-await-in-loop -- a stream is read in order
+      const { done, value } = await reader.read();
+      if (done || !value) break;
+      chunks.push(value);
+      size += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks).subarray(0, limit).toString("utf8");
 }
 
 export type SecretCheck = { ok: true } | { ok: false; reason: string };
@@ -143,7 +175,7 @@ export function checkSigningSecret(secret: string): SecretCheck {
 export type PostOutcome =
   | { kind: "accepted"; body: string }
   | { kind: "rejected"; status: number }
-  | { kind: "failed"; reason: "timeout" | "unreachable" };
+  | { kind: "failed"; reason: "timeout" | "connection_refused" | "tls_error" };
 
 // One signed POST. Every secret signs, space-separated, so a receiver mid
 // rotation accepts either key.
@@ -172,13 +204,29 @@ export async function postSigned(
     }
     return { kind: "accepted", body: await response.text().catch(() => "") };
   } catch (err) {
-    const timedOut =
-      err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    return { kind: "failed", reason: timedOut ? "timeout" : "unreachable" };
+    return { kind: "failed", reason: classifyFailure(err) };
   }
 }
 
-export type VerificationFailure = "challenge_failed" | "timeout" | "unreachable" | "http_error";
+// Categories from the MCP Events design sketch. A blocked address, a DNS
+// failure, and a refused redirect all read as connection_refused.
+function classifyFailure(err: unknown): "timeout" | "connection_refused" | "tls_error" {
+  if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+    return "timeout";
+  }
+  const cause = err instanceof Error ? err.cause : undefined;
+  const code =
+    cause !== null && typeof cause === "object" && "code" in cause ? String(cause.code) : "";
+  return /TLS|SSL|CERT|UNABLE_TO_VERIFY/.test(code) ? "tls_error" : "connection_refused";
+}
+
+export type VerificationFailure =
+  | "connection_refused"
+  | "timeout"
+  | "tls_error"
+  | "http_4xx"
+  | "http_5xx"
+  | "challenge_failed";
 
 export async function verifyCallback(
   callbackFetch: CallbackFetch,
@@ -193,7 +241,9 @@ export async function verifyCallback(
     body: JSON.stringify({ type: "verification", challenge }),
   });
   if (outcome.kind === "failed") return { ok: false, reason: outcome.reason };
-  if (outcome.kind === "rejected") return { ok: false, reason: "http_error" };
+  if (outcome.kind === "rejected") {
+    return { ok: false, reason: outcome.status >= 500 ? "http_5xx" : "http_4xx" };
+  }
   let echoed: unknown;
   try {
     echoed = (JSON.parse(outcome.body) as { challenge?: unknown }).challenge;

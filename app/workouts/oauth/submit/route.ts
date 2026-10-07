@@ -51,8 +51,7 @@ function respond(step: ConnectStep): Response {
     );
   }
   // 303 turns the POST into a GET at the next hop.
-  return new Response(null, {
-    status: 303,
-    headers: { Location: step.redirect, "Cache-Control": "no-store" },
-  });
+  const headers = new Headers({ Location: step.redirect, "Cache-Control": "no-store" });
+  if (step.setCookie) headers.set("Set-Cookie", step.setCookie);
+  return new Response(null, { status: 303, headers });
 }
