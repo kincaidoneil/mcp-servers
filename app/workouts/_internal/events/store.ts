@@ -143,14 +143,18 @@ export function createStore(kv: Kv, now: () => number) {
       });
     },
     async unreserveSubscription(principalId: string, id: string) {
-      await kv.srem(key.index({ kind: "principal", principalId }), id);
+      await kv.unreserve({
+        setKey: key.index({ kind: "principal", principalId }),
+        member: id,
+        recordKey: key.sub(id),
+      });
     },
 
     // One credential record per account, replaced on every subscribe and
-    // refresh, so the newest key is the one used. It lives exactly as long as
-    // the account's longest-lived subscription.
+    // refresh so the newest key is the one used. Its expiry only grows, so
+    // concurrent subscribes can't cut it below the longest subscription.
     async putCredentials(principalId: string, sealed: string, until: number) {
-      await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+      await kv.setExtending(key.credentials(principalId), sealed, Math.max(until - now(), 1));
     },
     async deleteCredentials(principalId: string) {
       await kv.del(key.credentials(principalId));

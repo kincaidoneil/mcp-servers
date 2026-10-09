@@ -828,6 +828,34 @@ describe("/workouts MCP events, end to end", () => {
     expect(await store.getCredentials(`${HEVY_USER}:i651018`)).toBeNull();
   });
 
+  it("keeps the store consistent when subscribes race", async () => {
+    // Two requests for the same subscription: the loser's failure must not
+    // remove the winner's slot.
+    const principalId = `${HEVY_USER}:i651018`;
+    expect(await store.reserveSubscription(principalId, "sub_same", 10)).toBe(true);
+    expect(await store.reserveSubscription(principalId, "sub_same", 10)).toBe(true);
+    await store.putSubscription({
+      id: "sub_same",
+      principalId,
+      hevyUserId: HEVY_USER,
+      intervalsAthleteId: "i651018",
+      arguments: {},
+      url: RECEIVER,
+      secrets: [{ secret: secret(), retiresAt: null }],
+      createdAt: clock,
+      expiresAt: clock + 3600_000,
+    });
+    await store.unreserveSubscription(principalId, "sub_same");
+    expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(1);
+
+    // A short subscription written after a long one never shortens the
+    // account's credentials.
+    await store.putCredentials(principalId, "sealed-long", clock + 30 * 24 * 3600_000);
+    await store.putCredentials(principalId, "sealed-short", clock + 3600_000);
+    clock += 2 * 3600_000;
+    expect(await store.getCredentials(principalId)).toBe("sealed-short");
+  });
+
   it("serves tools to the model", async () => {
     const token = await connect();
 

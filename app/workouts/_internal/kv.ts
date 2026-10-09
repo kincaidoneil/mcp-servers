@@ -44,6 +44,12 @@ export interface Kv {
     markerPrefix: string;
     markerPx: number;
   }): Promise<boolean>;
+  // Undo a reservation, unless the record now exists: a concurrent request
+  // with the same member may have completed it.
+  unreserve(op: { setKey: string; member: string; recordKey: string }): Promise<void>;
+  // Set a value whose expiry only ever grows: the TTL becomes the longer of
+  // the remaining one and `px`.
+  setExtending(key: string, value: string, px: number): Promise<void>;
 }
 
 const ENQUEUE_ONCE = `
@@ -65,6 +71,17 @@ if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 0 then
   redis.call('SADD', KEYS[1], ARGV[1])
 end
 redis.call('SET', ARGV[4] .. ARGV[1], '1', 'PX', ARGV[5])
+return 1`;
+
+const UNRESERVE = `
+if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
+return 1`;
+
+const SET_EXTENDING = `
+local px = tonumber(ARGV[2])
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining > px then px = remaining end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', px)
 return 1`;
 
 export function upstashKv(): Kv {
@@ -130,6 +147,12 @@ export function upstashKv(): Kv {
         [op.member, String(op.max), op.recordPrefix, op.markerPrefix, String(op.markerPx)],
       );
       return Number(added) === 1;
+    },
+    async unreserve(op) {
+      await redis.eval<string[], number>(UNRESERVE, [op.setKey, op.recordKey], [op.member]);
+    },
+    async setExtending(key, value, px) {
+      await redis.eval<string[], number>(SET_EXTENDING, [key], [value, String(px)]);
     },
   };
 }
@@ -209,6 +232,14 @@ export function memoryKv(now: () => number = Date.now): Kv {
       sets.set(op.setKey, set);
       strings.set(op.markerPrefix + op.member, { value: "1", expiresAt: now() + op.markerPx });
       return true;
+    },
+    async unreserve(op) {
+      if (!live(op.recordKey)) sets.get(op.setKey)?.delete(op.member);
+    },
+    async setExtending(key, value, px) {
+      const current = live(key);
+      const expiresAt = Math.max(now() + px, current?.expiresAt ?? 0);
+      strings.set(key, { value, expiresAt });
     },
   };
   return kv;

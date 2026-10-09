@@ -92,7 +92,6 @@ export async function subscribe(
   // included: this event has no replay, so workouts from the lapse are not
   // delivered.
   const existing = await store.getSubscription(id);
-  const live = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
   if (!existing) {
     const reserved = await store.reserveSubscription(
       principal.id,
@@ -112,7 +111,6 @@ export async function subscribe(
     url: url.url,
     args: args.data,
     existing,
-    live,
   });
   if (!outcome.ok && !existing) await store.unreserveSubscription(principal.id, id);
   return outcome;
@@ -126,7 +124,6 @@ async function activate(
     url: string;
     args: SubscriptionRecord["arguments"];
     existing: SubscriptionRecord | null;
-    live: SubscriptionRecord[];
   },
 ): Promise<SubscribeOutcome> {
   const { store, callbackFetch, now } = getDeps();
@@ -171,16 +168,13 @@ async function activate(
     createdAt: existing?.createdAt ?? at,
     expiresAt,
   };
-  // The newest credentials serve every subscription on the account, for as
-  // long as the longest-lived one.
-  const credentialsUntil = Math.max(
-    expiresAt,
-    ...ctx.live.filter((s) => s.id !== id).map((s) => s.expiresAt),
-  );
+  // Redis keeps the credentials as long as the account's longest-lived
+  // subscription (the store only ever extends their expiry). The sealed copy
+  // is valid for the maximum so it never expires first.
   await store.putCredentials(
     principal.id,
-    await sealCredentials(principal.credentials, credentialsUntil, at),
-    credentialsUntil,
+    await sealCredentials(principal.credentials, at + MAX_TTL_MS, at),
+    expiresAt,
   );
   await store.putSubscription(record);
 
