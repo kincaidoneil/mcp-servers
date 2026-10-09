@@ -158,11 +158,16 @@ export function createStore(kv: Kv, now: () => number) {
   return {
     getSubscription,
 
+    // Record and indexes in one write: ingestion must never see a new
+    // subscription in one place but not the other.
     async putSubscription(record: SubscriptionRecord) {
-      await kv.set(key.sub(record.id), JSON.stringify(record), {
+      await kv.setIndexed({
+        key: key.sub(record.id),
+        value: JSON.stringify(record),
         px: Math.max(record.expiresAt - now(), 1),
+        member: record.id,
+        sets: indexesOf(record).map((index) => key.index(index)),
       });
-      await Promise.all(indexesOf(record).map((index) => kv.sadd(key.index(index), record.id)));
     },
 
     deleteSubscription,

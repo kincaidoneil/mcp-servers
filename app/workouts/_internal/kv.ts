@@ -23,6 +23,15 @@ export interface Kv {
   // touching one that has since passed to someone else.
   delIfEquals(key: string, value: string): Promise<void>;
   sadd(key: string, member: string): Promise<void>;
+  // Atomically write a record and add its id to every index, so nothing can
+  // see the record without the indexes or the reverse.
+  setIndexed(op: {
+    key: string;
+    value: string;
+    px: number;
+    member: string;
+    sets: string[];
+  }): Promise<void>;
   // Remove `member` from a set only if `recordKey` is (still) absent, so a
   // prune can't undo a record recreated since it looked.
   sremIfMissing(setKey: string, member: string, recordKey: string): Promise<void>;
@@ -49,6 +58,11 @@ return 0`;
 
 const SREM_IF_MISSING = `
 if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
+return 1`;
+
+const SET_INDEXED = `
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+for i = 2, #KEYS do redis.call('SADD', KEYS[i], ARGV[3]) end
 return 1`;
 
 const DEL_IF_EQUALS = `
@@ -92,6 +106,13 @@ export function upstashKv(): Kv {
     },
     async sremIfMissing(setKey, member, recordKey) {
       await redis.eval<string[], number>(SREM_IF_MISSING, [setKey, recordKey], [member]);
+    },
+    async setIndexed(op) {
+      await redis.eval<string[], number>(
+        SET_INDEXED,
+        [op.key, ...op.sets],
+        [op.value, String(op.px), op.member],
+      );
     },
     async srem(key, member) {
       await redis.srem(key, member);
@@ -160,6 +181,14 @@ export function memoryKv(now: () => number = Date.now): Kv {
     },
     async sremIfMissing(setKey, member, recordKey) {
       if (!live(recordKey)) sets.get(setKey)?.delete(member);
+    },
+    async setIndexed(op) {
+      strings.set(op.key, { value: op.value, expiresAt: now() + op.px });
+      for (const setKey of op.sets) {
+        const set = sets.get(setKey) ?? new Set();
+        set.add(op.member);
+        sets.set(setKey, set);
+      }
     },
     async smembers(key) {
       return [...(sets.get(key) ?? [])];

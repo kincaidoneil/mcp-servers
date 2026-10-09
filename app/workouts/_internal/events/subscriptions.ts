@@ -127,7 +127,9 @@ async function activate(
     };
   }
 
-  const verifiedKey = digest([principal.id, params.delivery.url]);
+  // Keyed by the secret too: a refresh that rotates the secret must prove the
+  // receiver has the new one before the old one retires.
+  const verifiedKey = digest([principal.id, params.delivery.url, secret]);
   if (!(await store.isCallbackVerified(verifiedKey))) {
     const verified = await verifyCallback(callbackFetch, {
       url: ctx.url,
@@ -231,6 +233,9 @@ export async function unsubscribe(
         kind: "hevy",
         hevyUserId: principal.identity.hevyUserId,
       });
+      // The lock is per account; two allowlisted accounts sharing one Hevy
+      // user could race here. The allowlist pairs each Hevy user with one
+      // athlete in practice, so this does not serialize across accounts.
       if (!hevySubs.some(wantsHevy)) await releaseHevyWebhook(principal).catch(() => undefined);
     }
   });

@@ -170,6 +170,7 @@ interface Received {
   url: string;
   headers: Record<string, string>;
   body: Record<string, unknown>;
+  raw: string;
 }
 let received: Received[] = [];
 let receiverStatus = 200;
@@ -177,12 +178,20 @@ let receiverStatus = 200;
 const receiverSecrets = new Map<string, string[]>();
 
 const callbackFetch: CallbackFetch = async (url, init) => {
-  for (const s of receiverSecrets.get(url) ?? []) {
-    // Throws on a bad signature, failing the test.
-    new Webhook(s).verify(init.body, init.headers);
-  }
+  // Like a real Standard Webhooks receiver: accept when any signature checks
+  // out against a secret it holds.
+  const trusted = receiverSecrets.get(url) ?? [];
+  const valid = trusted.some((s) => {
+    try {
+      new Webhook(s).verify(init.body, init.headers);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (trusted.length > 0 && !valid) return { status: 401, text: async () => "" };
   const body = JSON.parse(init.body) as Record<string, unknown>;
-  received.push({ url, headers: init.headers, body });
+  received.push({ url, headers: init.headers, body, raw: init.body });
   if (body["type"] === "verification") {
     return { status: 200, text: async () => JSON.stringify({ challenge: body["challenge"] }) };
   }
@@ -503,14 +512,24 @@ describe("/workouts MCP events, end to end", () => {
     // Both attempts carried the same event id.
     expect(events().every((e) => e.headers["webhook-id"] === "intervals_i200")).toBe(true);
 
+    // A rotation to a secret the receiver doesn't hold fails verification,
+    // rather than being accepted on the strength of the old one.
+    const unknown = secret();
+    const refused = await rpc(token, "events/subscribe", subscribeParams(RECEIVER, unknown));
+    expect(refused.json.error).toMatchObject({ code: -32015, data: { reason: "http_4xx" } });
+
     // Secret rotation on refresh: deliveries are signed with old and new keys.
     const rotated = secret();
     receiverSecrets.set(RECEIVER, [signing, rotated]);
-    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, rotated));
+    const rotation = await rpc(token, "events/subscribe", subscribeParams(RECEIVER, rotated));
+    expect(rotation.json.result?.id).toBe(subId);
     received = [];
     expect(await hevyWebhookCall("c1085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(200);
     expect(events()).toHaveLength(1);
-    expect(events()[0]!.headers["webhook-signature"]!.split(" ")).toHaveLength(2);
+    const rotating = events()[0]!;
+    expect(rotating.headers["webhook-signature"]!.split(" ")).toHaveLength(2);
+    // Each key alone verifies it, so a receiver on either key accepts.
+    for (const key of [signing, rotated]) new Webhook(key).verify(rotating.raw, rotating.headers);
     // After the rotation window only the new key signs.
     clock += 11 * 60 * 1000;
     receiverSecrets.set(RECEIVER, [rotated]);
