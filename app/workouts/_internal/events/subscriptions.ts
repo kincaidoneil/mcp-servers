@@ -181,9 +181,15 @@ async function activate(
     const webhook = await ensureHevyWebhook(principal);
     if (!webhook.ok) {
       // Leave things as they were: a new subscription is withdrawn, a refresh
-      // keeps its previous record.
+      // keeps its previous record, and the credentials live only as long as
+      // what remains.
       if (existing) await store.putSubscription(existing);
       else await store.deleteSubscription(record);
+      const remaining = [...others, ...(existing ? [existing] : [])];
+      if (remaining.length === 0) await store.deleteCredentials(principal.id);
+      else {
+        await store.expireCredentials(principal.id, Math.max(...remaining.map((s) => s.expiresAt)));
+      }
       return { ok: false, code: SERVER_ERROR, message: webhook.reason };
     }
     await store.markWebhookOwner(principal.id);
@@ -224,7 +230,7 @@ export async function unsubscribe(
   principal: Principal,
   params: UnsubscribeParams,
 ): Promise<{ ok: true } | RpcFailure> {
-  const { store } = getDeps();
+  const { store, now } = getDeps();
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
   const locked = await store.withAccountLock(principal.id, async () => {
     const existing = await store.getSubscription(id);
@@ -239,13 +245,7 @@ export async function unsubscribe(
       kind: "principal",
       principalId: principal.id,
     });
-    // Credentials live only as long as the longest remaining subscription.
-    if (remaining.length === 0) {
-      await store.deleteCredentials(principal.id);
-    } else {
-      const until = Math.max(...remaining.map((s) => s.expiresAt));
-      await store.expireCredentials(principal.id, until);
-    }
+    let releasePending = false;
     if (wantsHevy(existing)) {
       const hevySubs = await store.listSubscriptions({
         kind: "hevy",
@@ -255,9 +255,22 @@ export async function unsubscribe(
       // user could race here. The allowlist pairs each Hevy user with one
       // athlete in practice, so this does not serialize across accounts.
       if (!hevySubs.some(wantsHevy)) {
-        await releaseHevyWebhook(principal.credentials.hevy.apiKey).catch(() => undefined);
-        await store.unmarkWebhookOwner(principal.id);
+        if (await releaseHevyWebhook(principal.credentials.hevy.apiKey)) {
+          await store.unmarkWebhookOwner(principal.id);
+        } else {
+          releasePending = true;
+        }
       }
+    }
+    // Credentials live only as long as the longest remaining subscription.
+    // If Hevy couldn't be reached, they and the owner mark stay through the
+    // cleanup grace so the tick can retry the release.
+    if (remaining.length > 0) {
+      await store.expireCredentials(principal.id, Math.max(...remaining.map((s) => s.expiresAt)));
+    } else if (releasePending) {
+      await store.expireCredentials(principal.id, now());
+    } else {
+      await store.deleteCredentials(principal.id);
     }
   });
   return locked ? { ok: true } : busy();

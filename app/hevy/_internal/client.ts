@@ -51,7 +51,10 @@ interface RequestOptions {
   body?: unknown;
 }
 
-export function createHevyClient(apiKey: string) {
+export function createHevyClient(
+  apiKey: string,
+  { timeoutMs = 10_000 }: { timeoutMs?: number } = {},
+) {
   async function request<Schema extends z.ZodType>(
     schema: Schema,
     opts: RequestOptions,
@@ -81,7 +84,7 @@ export function createHevyClient(apiKey: string) {
         },
         ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
         // Bounded so a slow Hevy can't outlast callers' own deadlines.
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

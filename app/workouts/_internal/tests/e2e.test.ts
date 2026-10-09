@@ -714,7 +714,18 @@ describe("/workouts MCP events, end to end", () => {
     upstream.resetHandlers();
     expect(await hevyWebhookCall("e1085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(200);
     expect(events()).toHaveLength(1);
-  });
+
+    // A stalled read gives up inside Hevy's 5 s acknowledgement deadline.
+    upstream.use(
+      http.get("https://api.hevyapp.com/v1/workouts/:id", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 6_000));
+        return new HttpResponse(null, { status: 500 });
+      }),
+    );
+    const started = Date.now();
+    expect(await hevyWebhookCall("e2085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(503);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
 
   it("caps subscriptions per account and reports verification failures by category", async () => {
     const token = await connect();
@@ -1032,6 +1043,11 @@ describe("/workouts MCP events, end to end", () => {
     await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
     await hevyWebhookCall("a3085cdb-32b2-4003-967d-53a3af8eaecb");
     expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(0);
+    // The credentials outlive the revocation just long enough for the tick to
+    // give back the webhook slot, which the Hevy key can still do.
+    expect(hevyWebhook).not.toBeNull();
+    await tick();
+    expect(hevyWebhook).toBeNull();
     expect(await store.getCredentials(principalId)).toBeNull();
   });
 
@@ -1116,6 +1132,77 @@ describe("/workouts MCP events, end to end", () => {
       (s) => s.url,
     );
     expect(ids).toEqual([RECEIVER]);
+
+    // ...and the credentials go back to living only as long as RECEIVER.
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: {},
+      delivery: { mode: "webhook", url: RECEIVER },
+    });
+    const retry = await rpc(token, "events/subscribe", {
+      ...subscribeParams(other, otherSecret),
+      ttlMs: 30 * 24 * 3600_000,
+    });
+    expect(retry.json.error?.message).toContain("Hevy webhook");
+    expect(await store.getCredentials(principalId)).toBeNull();
+  });
+
+  it("retries the Hevy webhook release when Hevy is unreachable", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    upstream.use(
+      http.delete(
+        "https://api.hevyapp.com/v1/webhook-subscription",
+        () => new HttpResponse(null, { status: 503 }),
+        { once: true },
+      ),
+    );
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: {},
+      delivery: { mode: "webhook", url: RECEIVER },
+    });
+    expect(hevyWebhook).not.toBeNull();
+    await tick();
+    expect(hevyWebhook).toBeNull();
+    expect(await store.getCredentials(`${HEVY_USER}:i651018`)).toBeNull();
+  });
+
+  it("keeps a recreated subscription's queued item apart from its predecessor's", async () => {
+    const base = {
+      id: "sub_same",
+      principalId: `${HEVY_USER}:i651018`,
+      hevyUserId: HEVY_USER,
+      intervalsAthleteId: "i651018",
+      arguments: {},
+      url: RECEIVER,
+      secrets: [{ secret: secret(), retiresAt: null }],
+      expiresAt: clock + 3600_000,
+    };
+    const event: McpEvent = {
+      eventId: "intervals_i1",
+      name: "workout.completed",
+      timestamp: new Date(clock).toISOString(),
+      data: {
+        source: "intervals",
+        workout_id: "i1",
+        title: "Run",
+        sport: "Run",
+        start_time: new Date(clock).toISOString(),
+        duration_seconds: 60,
+        url: "https://intervals.icu/activities/i1",
+        summary: "",
+      },
+      cursor: null,
+    };
+    // The new generation enqueues first; a stale snapshot of the old one
+    // finishes after it.
+    const fresh = await store.enqueueOnce({ ...base, createdAt: clock + 1 }, event);
+    const stale = await store.enqueueOnce({ ...base, createdAt: clock }, event);
+    expect(fresh).not.toBe(stale);
+    expect((await store.getOutboxItem(fresh!))?.subscriptionCreatedAt).toBe(clock + 1);
   });
 
   it("releases the Hevy webhook once subscriptions expire without an unsubscribe", async () => {

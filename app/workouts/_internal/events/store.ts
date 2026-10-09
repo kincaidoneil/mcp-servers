@@ -107,8 +107,10 @@ function digestIds(ids: string[]): string {
   return createHash("sha256").update(ids.toSorted().join(",")).digest("base64url").slice(0, 16);
 }
 
-export function outboxMember(subscriptionId: string, eventId: string): string {
-  return `${subscriptionId} ${eventId}`;
+// Keyed by the subscription's generation too, so an enqueue for a deleted
+// subscription can't overwrite the item queued for its re-creation.
+export function outboxMember(sub: SubscriptionRecord, eventId: string): string {
+  return `${sub.id} ${sub.createdAt} ${eventId}`;
 }
 
 export function createStore(kv: Kv, now: () => number) {
@@ -191,15 +193,17 @@ export function createStore(kv: Kv, now: () => number) {
         px: Math.max(until - now(), 0) + CLEANUP_GRACE_MS,
       });
     },
-    // Delete the account's subscriptions and credentials after an upstream
-    // rejected `sealed`, unless a refresh has stored different credentials
-    // since. Under the account lock, so it can't interleave with a refresh.
+    // Delete the account's subscriptions after an upstream rejected `sealed`,
+    // unless a refresh has stored different credentials since. The
+    // credentials stay for the cleanup grace: the other upstream's key may
+    // still work, and the tick needs it to release the Hevy webhook. Under the
+    // account lock, so it can't interleave with a refresh.
     async revokeAccount(principalId: string, sealed: string) {
       await withAccountLock(principalId, async () => {
         if ((await kv.get(key.credentials(principalId))) !== sealed) return;
         const subs = await listSubscriptions({ kind: "principal", principalId });
         await Promise.all(subs.map((s) => deleteSubscription(s)));
-        await kv.del(key.credentials(principalId));
+        await kv.set(key.credentials(principalId), sealed, { px: CLEANUP_GRACE_MS });
       });
     },
     async expireCredentials(principalId: string, until: number) {
@@ -237,7 +241,7 @@ export function createStore(kv: Kv, now: () => number) {
     // Queue an event for one subscription unless it was queued before.
     // Returns the outbox member when newly queued.
     async enqueueOnce(sub: SubscriptionRecord, event: McpEvent): Promise<string | null> {
-      const member = outboxMember(sub.id, event.eventId);
+      const member = outboxMember(sub, event.eventId);
       const item: OutboxItem = { event, attempts: 0, subscriptionCreatedAt: sub.createdAt };
       const taken = await kv.enqueueOnce({
         claimKey: key.claim(sub, event.eventId),

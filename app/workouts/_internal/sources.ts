@@ -131,12 +131,16 @@ export async function checkCredentials(principal: Principal): Promise<EnsureWebh
 }
 
 // Give the account's only webhook slot back once nothing here needs it. Leaves
-// a webhook that belongs to another service alone. Best effort: a failure
-// only means the next subscribe finds it still in place.
-export async function releaseHevyWebhook(hevyApiKey: string): Promise<void> {
+// a webhook that belongs to another service alone. Returns false when Hevy
+// couldn't be reached, so the caller keeps what it needs to try again; a
+// rejected key is final, since nothing could ever delete the webhook with it.
+export async function releaseHevyWebhook(hevyApiKey: string): Promise<boolean> {
   const client = createHevyClient(hevyApiKey);
   const current = await client.getWebhookSubscription();
-  if (current.ok && isOurs(current.value.url)) await client.deleteWebhookSubscription();
+  if (!current.ok) return current.code === "unauthorized" || current.code === "not_found";
+  if (!isOurs(current.value.url)) return true;
+  const deleted = await client.deleteWebhookSubscription();
+  return deleted.ok || deleted.code === "unauthorized" || deleted.code === "not_found";
 }
 
 function safeHost(url: string): string {
@@ -149,8 +153,14 @@ function safeHost(url: string): string {
 
 // ---- Event construction ----
 
+// Webhook deliveries must be acknowledged within Hevy's 5 s, so the read
+// gives up first and the receiver asks for a redelivery instead.
+const HEVY_WEBHOOK_READ_MS = 3_500;
+
 export async function hevyEvent(credentials: Credentials, workoutId: string) {
-  const result = await createHevyClient(credentials.hevy.apiKey).getWorkout(workoutId);
+  const result = await createHevyClient(credentials.hevy.apiKey, {
+    timeoutMs: HEVY_WEBHOOK_READ_MS,
+  }).getWorkout(workoutId);
   if (!result.ok) return result;
   const w = result.value;
   const end = w.end_time ? new Date(w.end_time) : null;
@@ -411,7 +421,8 @@ export async function releaseOrphanedWebhooks(): Promise<void> {
         const live = await store.listSubscriptions({ kind: "principal", principalId });
         if (live.some((s) => !s.arguments.sources || s.arguments.sources.includes("hevy"))) return;
         const credentials = await openCredentials(await store.getCredentials(principalId));
-        if (credentials) await releaseHevyWebhook(credentials.hevy.apiKey);
+        // Without credentials there is nothing left to retry with.
+        if (credentials && !(await releaseHevyWebhook(credentials.hevy.apiKey))) return;
         await store.unmarkWebhookOwner(principalId);
         if (live.length === 0) await store.deleteCredentials(principalId);
       }),
