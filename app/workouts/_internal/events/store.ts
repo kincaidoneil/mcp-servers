@@ -20,6 +20,9 @@ const ITEM_MS = 3 * DAY_MS;
 // check 10 s, four Hevy webhook calls at 10 s each); waiters give up after
 // LOCK_WAIT_MS.
 const LOCK_MS = 120_000;
+// Credentials outlive the last subscription by this much, so the tick can
+// still release the account's Hevy webhook after subscriptions just expire.
+const CLEANUP_GRACE_MS = DAY_MS;
 const LOCK_WAIT_MS = 60_000;
 
 const SubscriptionRecordSchema = z.object({
@@ -68,8 +71,12 @@ const key = {
     }
   },
   credentials: (principalId: string) => `wk:credentials:${principalId}`,
+  webhookOwners: "wk:hevy:webhook-owners",
   verified: (digest: string) => `wk:verified:${digest}`,
-  claim: (subscriptionId: string, eventId: string) => `wk:claim:${subscriptionId}:${eventId}`,
+  // Includes the subscription's createdAt: a resubscribe reuses the id, and
+  // the new lifetime must not inherit the old one's claims.
+  claim: (sub: SubscriptionRecord, eventId: string) =>
+    `wk:claim:${sub.id}:${sub.createdAt}:${eventId}`,
   outbox: "wk:outbox",
   outboxItem: (member: string) => `wk:outbox:item:${member}`,
   lease: (member: string) => `wk:lease:${member}`,
@@ -180,7 +187,9 @@ export function createStore(kv: Kv, now: () => number) {
     // One credential record per account, replaced on every subscribe and
     // refresh so the newest key is the one used, living as long as `until`.
     async putCredentials(principalId: string, sealed: string, until: number) {
-      await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+      await kv.set(key.credentials(principalId), sealed, {
+        px: Math.max(until - now(), 0) + CLEANUP_GRACE_MS,
+      });
     },
     // Delete the account's subscriptions and credentials after an upstream
     // rejected `sealed`, unless a refresh has stored different credentials
@@ -196,8 +205,20 @@ export function createStore(kv: Kv, now: () => number) {
     async expireCredentials(principalId: string, until: number) {
       const sealed = await kv.get(key.credentials(principalId));
       if (sealed) {
-        await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+        await kv.set(key.credentials(principalId), sealed, {
+          px: Math.max(until - now(), 0) + CLEANUP_GRACE_MS,
+        });
       }
+    },
+    // Accounts whose Hevy webhook points here, for the tick's cleanup.
+    async markWebhookOwner(principalId: string) {
+      await kv.sadd(key.webhookOwners, principalId);
+    },
+    async unmarkWebhookOwner(principalId: string) {
+      await kv.srem(key.webhookOwners, principalId);
+    },
+    async listWebhookOwners() {
+      return kv.smembers(key.webhookOwners);
     },
     async deleteCredentials(principalId: string) {
       await kv.del(key.credentials(principalId));
@@ -219,7 +240,7 @@ export function createStore(kv: Kv, now: () => number) {
       const member = outboxMember(sub.id, event.eventId);
       const item: OutboxItem = { event, attempts: 0, subscriptionCreatedAt: sub.createdAt };
       const taken = await kv.enqueueOnce({
-        claimKey: key.claim(sub.id, event.eventId),
+        claimKey: key.claim(sub, event.eventId),
         claimPx: CLAIM_MS,
         itemKey: key.outboxItem(member),
         item: JSON.stringify(item),
@@ -279,7 +300,8 @@ export function createStore(kv: Kv, now: () => number) {
 export type Store = ReturnType<typeof createStore>;
 
 export async function sealCredentials(credentials: Credentials, until: number, now: number) {
-  const ttlSeconds = Math.max(Math.ceil((until - now) / 1000), 1);
+  // Valid as long as the stored copy, cleanup grace included.
+  const ttlSeconds = Math.ceil((Math.max(until - now, 0) + CLEANUP_GRACE_MS) / 1000);
   return encryptJwe(
     { typ: "subscription-credentials", credentials },
     getConfig().oauth.signingKey,

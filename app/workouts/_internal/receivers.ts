@@ -11,6 +11,7 @@ import {
   ingestHevyWorkout,
   ingestIntervalsActivity,
   pollIntervals,
+  releaseOrphanedWebhooks,
 } from "./sources";
 
 export interface Received {
@@ -88,6 +89,7 @@ export async function runTick(req: Request): Promise<Response> {
     return Response.json({ error: "unauthorized" }, { status: 401 });
   }
   const polled = await pollIntervals();
+  await releaseOrphanedWebhooks();
   const results = await drainOutbox();
   const count = (r: DeliveryResult) => results.filter((x) => x === r).length;
   return Response.json({

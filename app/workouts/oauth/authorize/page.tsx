@@ -102,7 +102,8 @@ export default async function AuthorizePage({
 
         <p className={HINT}>
           Keys are validated upstream and sealed inside encrypted tokens. While a subscription is
-          active, an encrypted copy is kept so new workouts can be fetched without you.
+          active, and for one day after it ends, an encrypted copy is kept: to fetch new workouts
+          without you, and then to remove this server&apos;s Hevy webhook.
         </p>
 
         <section className="flex items-center gap-4">

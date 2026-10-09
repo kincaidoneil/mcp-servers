@@ -133,8 +133,8 @@ export async function checkCredentials(principal: Principal): Promise<EnsureWebh
 // Give the account's only webhook slot back once nothing here needs it. Leaves
 // a webhook that belongs to another service alone. Best effort: a failure
 // only means the next subscribe finds it still in place.
-export async function releaseHevyWebhook(principal: Principal): Promise<void> {
-  const client = createHevyClient(principal.credentials.hevy.apiKey);
+export async function releaseHevyWebhook(hevyApiKey: string): Promise<void> {
+  const client = createHevyClient(hevyApiKey);
   const current = await client.getWebhookSubscription();
   if (current.ok && isOurs(current.value.url)) await client.deleteWebhookSubscription();
 }
@@ -359,7 +359,9 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
     if (!listed.ok) {
       return { queued: [], retry: false, revoke: listed.code === "unauthorized" };
     }
-    const polledIds = group.map((s) => s.id);
+    // Generation included, so a subscription recreated under the same id gets
+    // a fresh handled set.
+    const polledIds = group.map((s) => `${s.id}@${s.createdAt}`);
     const handled = await store.getHandledActivities(principalId, polledIds);
     const oldestSubscription = Math.min(...group.map((s) => s.createdAt));
     const ready = listed.value.filter(
@@ -393,4 +395,26 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
 
 function isoDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
+}
+
+// ---- Webhook cleanup ----
+
+// Release the Hevy webhook of every account whose Hevy subscriptions have all
+// expired without an unsubscribe (a client that went away). Credentials are
+// kept a day past the last subscription for exactly this.
+export async function releaseOrphanedWebhooks(): Promise<void> {
+  const { store } = getDeps();
+  const owners = await store.listWebhookOwners();
+  await Promise.allSettled(
+    owners.map((principalId) =>
+      store.withAccountLock(principalId, async () => {
+        const live = await store.listSubscriptions({ kind: "principal", principalId });
+        if (live.some((s) => !s.arguments.sources || s.arguments.sources.includes("hevy"))) return;
+        const credentials = await openCredentials(await store.getCredentials(principalId));
+        if (credentials) await releaseHevyWebhook(credentials.hevy.apiKey);
+        await store.unmarkWebhookOwner(principalId);
+        if (live.length === 0) await store.deleteCredentials(principalId);
+      }),
+    ),
+  );
 }

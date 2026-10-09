@@ -266,7 +266,11 @@ async function connect(): Promise<string> {
   form.set("hevy_api_key", HEVY_KEY);
   form.set("intervals_api_key", INTERVALS_KEY);
   const consent = await submit(
-    new Request(`${BASE}/workouts/oauth/submit`, { method: "POST", body: form }),
+    new Request(`${BASE}/workouts/oauth/submit`, {
+      method: "POST",
+      body: form,
+      headers: { origin: BASE },
+    }),
   );
   expect(consent.status).toBe(303);
   const code = new URL(consent.headers.get("location")!).searchParams.get("code")!;
@@ -794,9 +798,23 @@ describe("/workouts MCP events, end to end", () => {
     form.set("as_state", authorized.asState);
     form.set("hevy_api_key", HEVY_KEY);
     const toIntervals = await submit(
-      new Request(`${BASE}/workouts/oauth/submit`, { method: "POST", body: form }),
+      new Request(`${BASE}/workouts/oauth/submit`, {
+        method: "POST",
+        body: form,
+        headers: { origin: BASE },
+      }),
     );
     expect(toIntervals.status).toBe(303);
+    // A cross-site page posting the same form is refused before anything runs.
+    const crossSite = await submit(
+      new Request(`${BASE}/workouts/oauth/submit`, {
+        method: "POST",
+        body: form,
+        headers: { origin: "https://attacker.example" },
+      }),
+    );
+    expect(crossSite.status).toBe(403);
+    expect(crossSite.headers.get("set-cookie")).toBeNull();
     const location = new URL(toIntervals.headers.get("location")!);
     expect(location.origin + location.pathname).toBe("https://intervals.icu/oauth/authorize");
     expect(location.searchParams.get("redirect_uri")).toBe(
@@ -1055,9 +1073,66 @@ describe("/workouts MCP events, end to end", () => {
       delivery: { mode: "webhook", url: "https://receiver.example.com/long" },
     });
     const principalId = `${HEVY_USER}:i651018`;
-    expect(await store.getCredentials(principalId)).not.toBeNull();
+    // Kept past the last subscription only for the one-day cleanup grace.
     clock += 2 * 3600_000;
+    expect(await store.getCredentials(principalId)).not.toBeNull();
+    clock += 24 * 3600_000;
     expect(await store.getCredentials(principalId)).toBeNull();
+  });
+
+  it("enables the Hevy webhook only after the subscription is stored", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    const principalId = `${HEVY_USER}:i651018`;
+    let visibleWhenEnabled: number | null = null;
+    upstream.use(
+      http.post("https://api.hevyapp.com/v1/webhook-subscription", async ({ request }) => {
+        visibleWhenEnabled = (
+          await store.listSubscriptions({ kind: "hevy", hevyUserId: HEVY_USER })
+        ).length;
+        const body = (await request.json()) as { url: string; authToken: string };
+        hevyWebhook = { url: body.url, auth_token: body.authToken };
+        return new HttpResponse(null, { status: 201 });
+      }),
+    );
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    expect(visibleWhenEnabled).toBe(1);
+
+    // If enabling fails, a new subscription is withdrawn.
+    upstream.use(
+      http.post(
+        "https://api.hevyapp.com/v1/webhook-subscription",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    hevyWebhook = null;
+    const other = "https://receiver.example.com/other";
+    const otherSecret = secret();
+    receiverSecrets.set(other, [otherSecret]);
+    const failed = await rpc(token, "events/subscribe", subscribeParams(other, otherSecret));
+    expect(failed.json.error?.message).toContain("Hevy webhook");
+    const ids = (await store.listSubscriptions({ kind: "principal", principalId })).map(
+      (s) => s.url,
+    );
+    expect(ids).toEqual([RECEIVER]);
+  });
+
+  it("releases the Hevy webhook once subscriptions expire without an unsubscribe", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(token, "events/subscribe", {
+      ...subscribeParams(RECEIVER, signing),
+      ttlMs: 3600_000,
+    });
+    expect(hevyWebhook).not.toBeNull();
+    await tick();
+    expect(hevyWebhook).not.toBeNull();
+    clock += 2 * 3600_000;
+    await tick();
+    expect(hevyWebhook).toBeNull();
+    expect(await store.getCredentials(`${HEVY_USER}:i651018`)).toBeNull();
   });
 
   it("serves tools to the model", async () => {

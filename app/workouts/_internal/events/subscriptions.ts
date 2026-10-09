@@ -150,13 +150,6 @@ async function activate(
   const credentialsOk = await checkCredentials(principal);
   if (!credentialsOk.ok) return { ok: false, code: SERVER_ERROR, message: credentialsOk.reason };
 
-  if (wantsHevy({ arguments: args })) {
-    // Every subscribe and refresh re-checks the registration, so a webhook
-    // removed on Hevy's side comes back within one refresh.
-    const webhook = await ensureHevyWebhook(principal);
-    if (!webhook.ok) return { ok: false, code: SERVER_ERROR, message: webhook.reason };
-  }
-
   const at = now();
   const expiresAt = at + grantTtl(params.ttlMs);
   const record: SubscriptionRecord = {
@@ -179,6 +172,22 @@ async function activate(
     credentialsUntil,
   );
   await store.putSubscription(record);
+
+  // The webhook goes on only once the subscription is stored, so a workout
+  // saved the moment it's enabled finds someone to deliver to. Every
+  // subscribe and refresh re-checks it, so a webhook removed on Hevy's side
+  // comes back within one refresh.
+  if (wantsHevy({ arguments: args })) {
+    const webhook = await ensureHevyWebhook(principal);
+    if (!webhook.ok) {
+      // Leave things as they were: a new subscription is withdrawn, a refresh
+      // keeps its previous record.
+      if (existing) await store.putSubscription(existing);
+      else await store.deleteSubscription(record);
+      return { ok: false, code: SERVER_ERROR, message: webhook.reason };
+    }
+    await store.markWebhookOwner(principal.id);
+  }
 
   return {
     ok: true,
@@ -245,7 +254,10 @@ export async function unsubscribe(
       // The lock is per account; two allowlisted accounts sharing one Hevy
       // user could race here. The allowlist pairs each Hevy user with one
       // athlete in practice, so this does not serialize across accounts.
-      if (!hevySubs.some(wantsHevy)) await releaseHevyWebhook(principal).catch(() => undefined);
+      if (!hevySubs.some(wantsHevy)) {
+        await releaseHevyWebhook(principal.credentials.hevy.apiKey).catch(() => undefined);
+        await store.unmarkWebhookOwner(principal.id);
+      }
     }
   });
   return locked ? { ok: true } : busy();

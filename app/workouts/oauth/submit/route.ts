@@ -1,6 +1,8 @@
 // Form handler for the /workouts consent screen. Validates the Hevy key, then
 // either validates the pasted Intervals key or hands off to Intervals OAuth.
-// CSRF: the signed as_state JWS is the gate, as on /hevy.
+// CSRF: the signed as_state JWS binds the submission to a validated
+// /authorize request, and the Origin check refuses cross-site posts, which
+// would otherwise let a third-party page skip this consent screen.
 
 import { decodeAsState, htmlErrorPage } from "@/lib/oauth-as";
 import { getConfig } from "../../_internal/config";
@@ -13,6 +15,13 @@ import {
 
 export async function POST(req: Request) {
   const config = getConfig();
+  if (!isSameOrigin(req, config.oauth.baseUrl)) {
+    return htmlErrorPage(
+      403,
+      "cross-site request",
+      "Submit this form from the consent page itself.",
+    );
+  }
   const form = await req.formData().catch(() => null);
   if (!form) return htmlErrorPage(400, "invalid request", "Expected a form submission.");
   const field = (name: string) => {
@@ -54,4 +63,12 @@ function respond(step: ConnectStep): Response {
   const headers = new Headers({ Location: step.redirect, "Cache-Control": "no-store" });
   if (step.setCookie) headers.set("Set-Cookie", step.setCookie);
   return new Response(null, { status: 303, headers });
+}
+
+// Browsers send Origin on every form POST; Sec-Fetch-Site backs it up for
+// clients that strip Origin. Anything else is refused.
+function isSameOrigin(req: Request, baseUrl: string): boolean {
+  const origin = req.headers.get("origin");
+  if (origin) return origin === new URL(baseUrl).origin;
+  return req.headers.get("sec-fetch-site") === "same-origin";
 }
