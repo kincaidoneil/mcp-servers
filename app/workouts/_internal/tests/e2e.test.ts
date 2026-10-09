@@ -1017,6 +1017,49 @@ describe("/workouts MCP events, end to end", () => {
     expect(await store.getCredentials(principalId)).toBeNull();
   });
 
+  it("refuses to roll the account back to a rotated key", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    const params = subscribeParams(RECEIVER, signing, { sources: ["intervals"] });
+    await rpc(token, "events/subscribe", params);
+    const principalId = `${HEVY_USER}:i651018`;
+    const stored = await store.getCredentials(principalId);
+    // The Hevy key in this token has since been rotated away.
+    upstream.use(
+      http.get(
+        "https://api.hevyapp.com/v1/user/info",
+        () => new HttpResponse(null, { status: 401 }),
+      ),
+    );
+    const stale = await rpc(token, "events/subscribe", params);
+    expect(stale.json.error?.message).toContain("reconnect");
+    expect(await store.getCredentials(principalId)).toBe(stored);
+  });
+
+  it("keeps credentials only as long as the longest remaining subscription", async () => {
+    const token = await connect();
+    const sub = (url: string, ttlMs?: number) => {
+      const s = secret();
+      receiverSecrets.set(url, [s]);
+      return rpc(token, "events/subscribe", {
+        ...subscribeParams(url, s),
+        ...(ttlMs ? { ttlMs } : {}),
+      });
+    };
+    await sub("https://receiver.example.com/long");
+    await sub("https://receiver.example.com/short", 3600_000);
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: {},
+      delivery: { mode: "webhook", url: "https://receiver.example.com/long" },
+    });
+    const principalId = `${HEVY_USER}:i651018`;
+    expect(await store.getCredentials(principalId)).not.toBeNull();
+    clock += 2 * 3600_000;
+    expect(await store.getCredentials(principalId)).toBeNull();
+  });
+
   it("serves tools to the model", async () => {
     const token = await connect();
 

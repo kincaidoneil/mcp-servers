@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import type { Principal } from "../credentials";
 import { getDeps } from "../deps";
-import { ensureHevyWebhook, releaseHevyWebhook } from "../sources";
+import { checkCredentials, ensureHevyWebhook, releaseHevyWebhook } from "../sources";
 import { checkCallbackUrl, checkSigningSecret, verifyCallback } from "./callback";
 import {
   CALLBACK_ENDPOINT_ERROR,
@@ -147,6 +147,9 @@ async function activate(
     await store.markCallbackVerified(verifiedKey);
   }
 
+  const credentialsOk = await checkCredentials(principal);
+  if (!credentialsOk.ok) return { ok: false, code: SERVER_ERROR, message: credentialsOk.reason };
+
   if (wantsHevy({ arguments: args })) {
     // Every subscribe and refresh re-checks the registration, so a webhook
     // removed on Hevy's side comes back within one refresh.
@@ -227,7 +230,13 @@ export async function unsubscribe(
       kind: "principal",
       principalId: principal.id,
     });
-    if (remaining.length === 0) await store.deleteCredentials(principal.id);
+    // Credentials live only as long as the longest remaining subscription.
+    if (remaining.length === 0) {
+      await store.deleteCredentials(principal.id);
+    } else {
+      const until = Math.max(...remaining.map((s) => s.expiresAt));
+      await store.expireCredentials(principal.id, until);
+    }
     if (wantsHevy(existing)) {
       const hevySubs = await store.listSubscriptions({
         kind: "hevy",

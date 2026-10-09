@@ -16,8 +16,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Longer than any window in which the same workout could be seen again.
 const CLAIM_MS = 30 * DAY_MS;
 const ITEM_MS = 3 * DAY_MS;
-// The lock outlives the slowest subscribe (verification 10 s, four Hevy calls
-// at 10 s each); waiters give up after LOCK_WAIT_MS.
+// The lock outlives the slowest subscribe (verification 10 s, the credential
+// check 10 s, four Hevy webhook calls at 10 s each); waiters give up after
+// LOCK_WAIT_MS.
 const LOCK_MS = 120_000;
 const LOCK_WAIT_MS = 60_000;
 
@@ -191,6 +192,12 @@ export function createStore(kv: Kv, now: () => number) {
         await Promise.all(subs.map((s) => deleteSubscription(s)));
         await kv.del(key.credentials(principalId));
       });
+    },
+    async expireCredentials(principalId: string, until: number) {
+      const sealed = await kv.get(key.credentials(principalId));
+      if (sealed) {
+        await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+      }
     },
     async deleteCredentials(principalId: string) {
       await kv.del(key.credentials(principalId));

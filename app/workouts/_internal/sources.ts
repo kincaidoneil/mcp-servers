@@ -4,7 +4,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createHevyClient } from "@/app/hevy/_internal/client";
 import { renderWorkout } from "@/app/hevy/_internal/render";
-import { getConfig } from "./config";
+import { getConfig, normalizeAthleteId } from "./config";
 import { isAllowed, type Credentials, type Principal } from "./credentials";
 import { getDeps } from "./deps";
 import { emit } from "./events/dispatch";
@@ -101,6 +101,33 @@ export async function ensureHevyWebhook(principal: Principal): Promise<EnsureWeb
         ok: false,
         reason: `Could not register the Hevy webhook (${created.code}); no Hevy webhook is set now.`,
       };
+}
+
+// Confirm both upstream credentials still work and still belong to this
+// account before they replace the stored ones. A client holding an old
+// refresh token would otherwise roll the account back to a rotated key.
+export async function checkCredentials(principal: Principal): Promise<EnsureWebhookResult> {
+  const [hevy, intervals] = await Promise.all([
+    createHevyClient(principal.credentials.hevy.apiKey).getUserInfo(),
+    createIntervalsClient(principal.credentials.intervals).getAthlete(),
+  ]);
+  if (!hevy.ok || !intervals.ok) {
+    const rejected =
+      (!hevy.ok && hevy.code === "unauthorized") ||
+      (!intervals.ok && intervals.code === "unauthorized");
+    return {
+      ok: false,
+      reason: rejected
+        ? "Hevy or Intervals.icu rejected this connection's API key; reconnect the workouts server with the current keys."
+        : "Could not confirm the Hevy and Intervals.icu keys right now; try again shortly.",
+    };
+  }
+  const sameAccount =
+    hevy.value.data.id === principal.identity.hevyUserId &&
+    normalizeAthleteId(intervals.value.id) === principal.identity.intervalsAthleteId;
+  return sameAccount
+    ? { ok: true }
+    : { ok: false, reason: "These keys now belong to a different account; reconnect." };
 }
 
 // Give the account's only webhook slot back once nothing here needs it. Leaves
