@@ -97,6 +97,22 @@ export function createStore(kv: Kv, now: () => number) {
     return record && record.expiresAt > now() ? record : null;
   }
 
+  // Live subscriptions in an index. Ids whose record is gone from Redis are
+  // pruned, except in the per-account index: there an id may be reserved by
+  // a subscribe still in flight, and reserveSubscription prunes atomically.
+  async function listSubscriptions(index: SubscriptionIndex): Promise<SubscriptionRecord[]> {
+    const ids = await kv.smembers(key.index(index));
+    const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
+    if (index.kind !== "principal") {
+      await Promise.all(
+        ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
+      );
+    }
+    return raws
+      .map((raw) => parse(SubscriptionRecordSchema, raw))
+      .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
+  }
+
   return {
     getSubscription,
 
@@ -112,21 +128,7 @@ export function createStore(kv: Kv, now: () => number) {
       await Promise.all(indexesOf(record).map((index) => kv.srem(key.index(index), record.id)));
     },
 
-    // Live subscriptions in an index. Ids whose record is gone from Redis are
-    // pruned, except in the per-account index: there an id may be reserved by
-    // a subscribe still in flight, and reserveSubscription prunes atomically.
-    async listSubscriptions(index: SubscriptionIndex): Promise<SubscriptionRecord[]> {
-      const ids = await kv.smembers(key.index(index));
-      const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
-      if (index.kind !== "principal") {
-        await Promise.all(
-          ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
-        );
-      }
-      return raws
-        .map((raw) => parse(SubscriptionRecordSchema, raw))
-        .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
-    },
+    listSubscriptions,
 
     // Reserve a place in the account's index before the slow parts of
     // subscribing (verification, the Hevy webhook), so concurrent requests
@@ -138,9 +140,20 @@ export function createStore(kv: Kv, now: () => number) {
         max,
         recordPrefix: key.sub(""),
         markerPrefix: key.reserved(""),
-        // Longer than verification (10 s) plus the Hevy calls.
-        markerPx: 60_000,
+        // Longer than the slowest subscribe: verification (10 s) plus up to four
+        // Hevy calls (10 s each).
+        markerPx: 120_000,
       });
+    },
+    // The account's slots in use (live or being created) and its live
+    // subscriptions. More slots than live ones means a subscribe in flight.
+    async accountSubscriptions(principalId: string) {
+      const index: SubscriptionIndex = { kind: "principal", principalId };
+      const [reserved, live] = await Promise.all([
+        kv.smembers(key.index(index)),
+        listSubscriptions(index),
+      ]);
+      return { reserved: reserved.length, live };
     },
     async unreserveSubscription(principalId: string, id: string) {
       await kv.unreserve({

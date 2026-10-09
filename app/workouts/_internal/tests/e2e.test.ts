@@ -856,6 +856,23 @@ describe("/workouts MCP events, end to end", () => {
     expect(await store.getCredentials(principalId)).toBe("sealed-short");
   });
 
+  it("keeps credentials and the Hevy webhook for a subscribe still in flight", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    // A replacement subscribe has reserved its slot but not written its record.
+    const principalId = `${HEVY_USER}:i651018`;
+    expect(await store.reserveSubscription(principalId, "sub_in_flight", 10)).toBe(true);
+    await rpc(token, "events/unsubscribe", {
+      name: "workout.completed",
+      arguments: {},
+      delivery: { mode: "webhook", url: RECEIVER },
+    });
+    expect(await store.getCredentials(principalId)).not.toBeNull();
+    expect(hevyWebhook).not.toBeNull();
+  });
+
   it("serves tools to the model", async () => {
     const token = await connect();
 

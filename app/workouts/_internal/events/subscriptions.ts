@@ -218,11 +218,17 @@ export async function unsubscribe(principal: Principal, params: UnsubscribeParam
   if (!existing) return {};
   await store.deleteSubscription(existing);
 
-  // Clean up what only live subscriptions need: the account's credentials,
-  // and the Hevy account's single webhook slot.
-  const remaining = await store.listSubscriptions({ kind: "principal", principalId: principal.id });
-  if (remaining.length === 0) await store.deleteCredentials(principal.id);
-  if (wantsHevy(existing)) {
+  // Clean up what only subscriptions need: the account's credentials, and the
+  // Hevy account's single webhook slot. A subscribe still in flight holds a
+  // reservation but no record yet, so it counts as in use. Leaving either
+  // behind is harmless: credentials expire, and every subscribe re-checks the
+  // webhook.
+  const { reserved, live } = await store.accountSubscriptions(principal.id);
+  if (reserved === 0) {
+    await store.deleteCredentials(principal.id);
+  }
+  const pending = reserved > live.length;
+  if (wantsHevy(existing) && !pending) {
     const hevySubs = await store.listSubscriptions({
       kind: "hevy",
       hevyUserId: principal.identity.hevyUserId,

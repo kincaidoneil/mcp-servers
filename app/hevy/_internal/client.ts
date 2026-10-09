@@ -80,6 +80,8 @@ export function createHevyClient(apiKey: string) {
           ...(opts.body !== undefined ? { "content-type": "application/json" } : {}),
         },
         ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+        // Bounded so a slow Hevy can't outlast callers' own deadlines.
+        signal: AbortSignal.timeout(10_000),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
