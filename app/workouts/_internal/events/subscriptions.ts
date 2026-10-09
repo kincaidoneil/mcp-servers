@@ -166,9 +166,13 @@ async function activate(
   // The newest credentials serve every subscription on the account, for as
   // long as the longest-lived one.
   const credentialsUntil = Math.max(expiresAt, ...others.map((s) => s.expiresAt));
+  // Sealed to outlast the record this refresh replaces too, so a rollback
+  // that restores it can't outlive the ciphertext. Redis still drops them at
+  // `credentialsUntil`.
+  const sealedUntil = Math.max(credentialsUntil, existing?.expiresAt ?? 0);
   await store.putCredentials(
     principal.id,
-    await sealCredentials(principal.credentials, credentialsUntil, at),
+    await sealCredentials(principal.credentials, sealedUntil, at),
     credentialsUntil,
   );
   await store.putSubscription(record);
@@ -178,6 +182,9 @@ async function activate(
   // subscribe and refresh re-checks it, so a webhook removed on Hevy's side
   // comes back within one refresh.
   if (wantsHevy({ arguments: args })) {
+    // Marked before the webhook exists, so the tick can find and release it
+    // even if this invocation dies right after Hevy creates it.
+    await store.markWebhookOwner(principal.id);
     const webhook = await ensureHevyWebhook(principal);
     if (!webhook.ok) {
       // Leave things as they were: a new subscription is withdrawn, a refresh
@@ -192,7 +199,6 @@ async function activate(
       }
       return { ok: false, code: SERVER_ERROR, message: webhook.reason };
     }
-    await store.markWebhookOwner(principal.id);
   }
 
   return {

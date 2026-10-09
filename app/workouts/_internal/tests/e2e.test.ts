@@ -8,13 +8,13 @@ import { randomBytes } from "node:crypto";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { Webhook } from "standardwebhooks";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateAuthorize } from "@/lib/oauth-as";
 import { resetConfigCacheForTesting } from "../config";
 import { setDepsForTesting } from "../deps";
 import { deliverAll } from "../events/dispatch";
 import { WorkoutCompletedSchema, type McpEvent } from "../events/schema";
-import { createStore } from "../events/store";
+import { createStore, openCredentials } from "../events/store";
 import { memoryKv, type Kv } from "../kv";
 import { receiveHevyWebhook, receiveIntervalsWebhook } from "../receivers";
 import { hevyWebhookToken, hevyWebhookUrl } from "../sources";
@@ -1102,11 +1102,13 @@ describe("/workouts MCP events, end to end", () => {
     receiverSecrets.set(RECEIVER, [signing]);
     const principalId = `${HEVY_USER}:i651018`;
     let visibleWhenEnabled: number | null = null;
+    let ownersWhenEnabled: string[] = [];
     upstream.use(
       http.post("https://api.hevyapp.com/v1/webhook-subscription", async ({ request }) => {
         visibleWhenEnabled = (
           await store.listSubscriptions({ kind: "hevy", hevyUserId: HEVY_USER })
         ).length;
+        ownersWhenEnabled = await store.listWebhookOwners();
         const body = (await request.json()) as { url: string; authToken: string };
         hevyWebhook = { url: body.url, auth_token: body.authToken };
         return new HttpResponse(null, { status: 201 });
@@ -1114,6 +1116,8 @@ describe("/workouts MCP events, end to end", () => {
     );
     await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
     expect(visibleWhenEnabled).toBe(1);
+    // Already findable by the tick's cleanup if this invocation dies now.
+    expect(ownersWhenEnabled).toEqual([principalId]);
 
     // If enabling fails, a new subscription is withdrawn.
     upstream.use(
@@ -1145,6 +1149,33 @@ describe("/workouts MCP events, end to end", () => {
     });
     expect(retry.json.error?.message).toContain("Hevy webhook");
     expect(await store.getCredentials(principalId)).toBeNull();
+  });
+
+  it("keeps a refresh rolled back after a webhook failure readable for its whole life", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    const params = subscribeParams(RECEIVER, signing);
+    await rpc(token, "events/subscribe", { ...params, ttlMs: 30 * 24 * 3600_000 });
+    upstream.use(
+      http.post(
+        "https://api.hevyapp.com/v1/webhook-subscription",
+        () => new HttpResponse(null, { status: 500 }),
+      ),
+    );
+    hevyWebhook = null;
+    const failed = await rpc(token, "events/subscribe", { ...params, ttlMs: 3600_000 });
+    expect(failed.json.error?.message).toContain("Hevy webhook");
+    clock += 3 * 24 * 3600_000;
+    const principalId = `${HEVY_USER}:i651018`;
+    expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(1);
+    // The ciphertext's own expiry reads the system clock.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 3 * 24 * 3600_000 });
+    try {
+      expect(await openCredentials(await store.getCredentials(principalId))).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retries the Hevy webhook release when Hevy is unreachable", async () => {
