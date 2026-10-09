@@ -211,12 +211,15 @@ async function perAccount(
   }
   const results = await Promise.allSettled(
     [...accounts].map(async ([principalId, group]) => {
-      const credentials = await openCredentials(await store.getCredentials(principalId));
+      const sealed = await store.getCredentials(principalId);
+      const credentials = await openCredentials(sealed);
       // Unreadable credentials (expired, or JWT_SIGNING_KEY rotated) cannot
       // recover; the client's next refresh writes fresh ones.
-      if (!credentials) return { queued: [], retry: false };
+      if (!sealed || !credentials) return { queued: [], retry: false };
       const result = await fn(credentials, group, principalId);
-      if (result.revoke) await Promise.all(group.map((s) => store.deleteSubscription(s)));
+      // Only if these are still the stored credentials: a reconnect may have
+      // replaced them while the upstream call was in flight.
+      if (result.revoke) await store.revokeAccount(principalId, sealed);
       return result;
     }),
   );

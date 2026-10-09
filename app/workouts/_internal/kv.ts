@@ -23,6 +23,9 @@ export interface Kv {
   // touching one that has since passed to someone else.
   delIfEquals(key: string, value: string): Promise<void>;
   sadd(key: string, member: string): Promise<void>;
+  // Remove `member` from a set only if `recordKey` is (still) absent, so a
+  // prune can't undo a record recreated since it looked.
+  sremIfMissing(setKey: string, member: string, recordKey: string): Promise<void>;
   srem(key: string, member: string): Promise<void>;
   smembers(key: string): Promise<string[]>;
   zadd(key: string, score: number, member: string): Promise<void>;
@@ -43,6 +46,10 @@ if redis.call('SET', KEYS[1], '1', 'NX', 'PX', ARGV[1]) then
   return 1
 end
 return 0`;
+
+const SREM_IF_MISSING = `
+if redis.call('EXISTS', KEYS[2]) == 0 then redis.call('SREM', KEYS[1], ARGV[1]) end
+return 1`;
 
 const DEL_IF_EQUALS = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end
@@ -82,6 +89,9 @@ export function upstashKv(): Kv {
     },
     async sadd(key, member) {
       await redis.sadd(key, member);
+    },
+    async sremIfMissing(setKey, member, recordKey) {
+      await redis.eval<string[], number>(SREM_IF_MISSING, [setKey, recordKey], [member]);
     },
     async srem(key, member) {
       await redis.srem(key, member);
@@ -147,6 +157,9 @@ export function memoryKv(now: () => number = Date.now): Kv {
     },
     async srem(key, member) {
       sets.get(key)?.delete(member);
+    },
+    async sremIfMissing(setKey, member, recordKey) {
+      if (!live(recordKey)) sets.get(setKey)?.delete(member);
     },
     async smembers(key) {
       return [...(sets.get(key) ?? [])];

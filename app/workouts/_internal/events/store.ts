@@ -117,11 +117,42 @@ export function createStore(kv: Kv, now: () => number) {
     const ids = await kv.smembers(key.index(index));
     const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
     await Promise.all(
-      ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
+      ids.map((id, i) =>
+        raws[i] === null ? kv.sremIfMissing(key.index(index), id, key.sub(id)) : null,
+      ),
     );
     return raws
       .map((raw) => parse(SubscriptionRecordSchema, raw))
       .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
+  }
+
+  async function deleteSubscription(record: SubscriptionRecord) {
+    await kv.del(key.sub(record.id));
+    await Promise.all(indexesOf(record).map((index) => kv.srem(key.index(index), record.id)));
+  }
+
+  // Run fn while holding the account's lock. Subscribe and unsubscribe take
+  // it, so their check-then-write steps (the cap, credential lifetime,
+  // cleanup) never interleave. They are rare, so waiting costs nothing.
+  // Returns null if the lock stays busy past LOCK_WAIT_MS.
+  async function withAccountLock<T>(
+    principalId: string,
+    fn: () => Promise<T>,
+  ): Promise<{ value: T } | null> {
+    const token = randomUUID();
+    // Real time, not the injectable clock: this is a wait, not a timestamp.
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    // oxlint-disable-next-line no-await-in-loop -- polling for the lock
+    while (!(await kv.set(key.lock(principalId), token, { px: LOCK_MS, nx: true }))) {
+      if (Date.now() > deadline) return null;
+      // oxlint-disable-next-line no-await-in-loop -- polling for the lock
+      await new Promise((resolve) => setTimeout(resolve, 25 + Math.random() * 50));
+    }
+    try {
+      return { value: await fn() };
+    } finally {
+      await kv.delIfEquals(key.lock(principalId), token);
+    }
   }
 
   return {
@@ -134,41 +165,27 @@ export function createStore(kv: Kv, now: () => number) {
       await Promise.all(indexesOf(record).map((index) => kv.sadd(key.index(index), record.id)));
     },
 
-    async deleteSubscription(record: SubscriptionRecord) {
-      await kv.del(key.sub(record.id));
-      await Promise.all(indexesOf(record).map((index) => kv.srem(key.index(index), record.id)));
-    },
+    deleteSubscription,
 
     listSubscriptions,
 
-    // Run fn while holding the account's lock. Subscribe and unsubscribe take
-    // it, so their check-then-write steps (the cap, credential lifetime,
-    // cleanup) never interleave. They are rare, so waiting costs nothing.
-    // Returns null if the lock stays busy past LOCK_WAIT_MS.
-    async withAccountLock<T>(
-      principalId: string,
-      fn: () => Promise<T>,
-    ): Promise<{ value: T } | null> {
-      const token = randomUUID();
-      // Real time, not the injectable clock: this is a wait, not a timestamp.
-      const deadline = Date.now() + LOCK_WAIT_MS;
-      // oxlint-disable-next-line no-await-in-loop -- polling for the lock
-      while (!(await kv.set(key.lock(principalId), token, { px: LOCK_MS, nx: true }))) {
-        if (Date.now() > deadline) return null;
-        // oxlint-disable-next-line no-await-in-loop -- polling for the lock
-        await new Promise((resolve) => setTimeout(resolve, 25 + Math.random() * 50));
-      }
-      try {
-        return { value: await fn() };
-      } finally {
-        await kv.delIfEquals(key.lock(principalId), token);
-      }
-    },
+    withAccountLock,
 
     // One credential record per account, replaced on every subscribe and
     // refresh so the newest key is the one used, living as long as `until`.
     async putCredentials(principalId: string, sealed: string, until: number) {
       await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
+    },
+    // Delete the account's subscriptions and credentials after an upstream
+    // rejected `sealed`, unless a refresh has stored different credentials
+    // since. Under the account lock, so it can't interleave with a refresh.
+    async revokeAccount(principalId: string, sealed: string) {
+      await withAccountLock(principalId, async () => {
+        if ((await kv.get(key.credentials(principalId))) !== sealed) return;
+        const subs = await listSubscriptions({ kind: "principal", principalId });
+        await Promise.all(subs.map((s) => deleteSubscription(s)));
+        await kv.del(key.credentials(principalId));
+      });
     },
     async deleteCredentials(principalId: string) {
       await kv.del(key.credentials(principalId));

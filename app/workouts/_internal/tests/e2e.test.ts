@@ -15,7 +15,7 @@ import { setDepsForTesting } from "../deps";
 import { deliverAll } from "../events/dispatch";
 import { WorkoutCompletedSchema, type McpEvent } from "../events/schema";
 import { createStore } from "../events/store";
-import { memoryKv } from "../kv";
+import { memoryKv, type Kv } from "../kv";
 import { receiveHevyWebhook, receiveIntervalsWebhook } from "../receivers";
 import { hevyWebhookToken, hevyWebhookUrl } from "../sources";
 import {
@@ -936,6 +936,66 @@ describe("/workouts MCP events, end to end", () => {
     expect(events().map((e) => [e.url, (e.body as unknown as McpEvent).eventId])).toEqual([
       [RUNS, "intervals_i900"],
     ]);
+  });
+
+  it("never prunes a subscription that a refresh just recreated", async () => {
+    // The first read of the record misses (it had expired), and the refresh
+    // recreates it before the prune runs.
+    const inner = memoryKv(now);
+    let missOnce = true;
+    const kv: Kv = {
+      ...inner,
+      get: async (k) => {
+        if (k === "wk:sub:sub_refreshed" && missOnce) {
+          missOnce = false;
+          return null;
+        }
+        return inner.get(k);
+      },
+    };
+    const racing = createStore(kv, now);
+    await racing.putSubscription({
+      id: "sub_refreshed",
+      principalId: `${HEVY_USER}:i651018`,
+      hevyUserId: HEVY_USER,
+      intervalsAthleteId: "i651018",
+      arguments: {},
+      url: RECEIVER,
+      secrets: [{ secret: secret(), retiresAt: null }],
+      createdAt: clock,
+      expiresAt: clock + 3600_000,
+    });
+    expect(await racing.listSubscriptions({ kind: "all" })).toHaveLength(0);
+    expect(await racing.listSubscriptions({ kind: "all" })).toHaveLength(1);
+  });
+
+  it("revokes on a 401 only if the credentials are still the ones that failed", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    const principalId = `${HEVY_USER}:i651018`;
+    // Hevy rejects the old key while a reconnect stores new credentials.
+    upstream.use(
+      http.get("https://api.hevyapp.com/v1/workouts/:id", async () => {
+        await store.putCredentials(principalId, "sealed-after-reconnect", clock + 3600_000);
+        return new HttpResponse(null, { status: 401 });
+      }),
+    );
+    await hevyWebhookCall("a2085cdb-32b2-4003-967d-53a3af8eaecb");
+    expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(1);
+
+    // With no reconnect, a 401 revokes the account.
+    upstream.use(
+      http.get(
+        "https://api.hevyapp.com/v1/workouts/:id",
+        () => new HttpResponse(null, { status: 401 }),
+      ),
+    );
+    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
+    await hevyWebhookCall("a3085cdb-32b2-4003-967d-53a3af8eaecb");
+    expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(0);
+    expect(await store.getCredentials(principalId)).toBeNull();
   });
 
   it("serves tools to the model", async () => {
