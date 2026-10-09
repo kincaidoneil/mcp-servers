@@ -329,7 +329,8 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
     if (!listed.ok) {
       return { queued: [], retry: false, revoke: listed.code === "unauthorized" };
     }
-    const handled = await store.getHandledActivities(principalId);
+    const polledIds = group.map((s) => s.id);
+    const handled = await store.getHandledActivities(principalId, polledIds);
     const oldestSubscription = Math.min(...group.map((s) => s.createdAt));
     const ready = listed.value.filter(
       (a) => a.analyzed || activityCreatedAt(a, now()) < now() - ANALYSIS_GRACE_MS,
@@ -353,6 +354,7 @@ async function pollAthlete(athleteId: string): Promise<IngestResult> {
     // Only ids still inside the window can come back, so drop the rest.
     await store.setHandledActivities(
       principalId,
+      polledIds,
       listed.value.map((a) => a.id).filter((id) => handled.has(id)),
     );
     return { queued: queued.flat(), retry: false };

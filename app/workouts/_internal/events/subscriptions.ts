@@ -88,47 +88,44 @@ export async function subscribe(
 
   // Identity uses the URL exactly as sent, so unsubscribe finds it again.
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
+  const locked = await store.withAccountLock(principal.id, () =>
+    activate(principal, params, { id, url: url.url, args: args.data }),
+  );
+  return locked ? locked.value : busy();
+}
+
+function busy(): RpcFailure {
+  return {
+    ok: false,
+    code: SERVER_ERROR,
+    message: "Another subscription change for this account is in progress; retry shortly.",
+  };
+}
+
+// Runs under the account lock, so what it reads stays true until it writes.
+async function activate(
+  principal: Principal,
+  params: SubscribeParams,
+  ctx: { id: string; url: string; args: SubscriptionRecord["arguments"] },
+): Promise<SubscribeOutcome> {
+  const { store, callbackFetch, now } = getDeps();
+  const { id, args } = ctx;
+  const secret = params.delivery.secret;
+
   // A late refresh of an expired subscription starts over, createdAt
   // included: this event has no replay, so workouts from the lapse are not
   // delivered.
   const existing = await store.getSubscription(id);
-  if (!existing) {
-    const reserved = await store.reserveSubscription(
-      principal.id,
-      id,
-      MAX_SUBSCRIPTIONS_PER_ACCOUNT,
-    );
-    if (!reserved) {
-      return {
-        ok: false,
-        code: SERVER_ERROR,
-        message: `This account already has ${MAX_SUBSCRIPTIONS_PER_ACCOUNT} subscriptions; unsubscribe one first.`,
-      };
-    }
+  const others = (
+    await store.listSubscriptions({ kind: "principal", principalId: principal.id })
+  ).filter((s) => s.id !== id);
+  if (!existing && others.length >= MAX_SUBSCRIPTIONS_PER_ACCOUNT) {
+    return {
+      ok: false,
+      code: SERVER_ERROR,
+      message: `This account already has ${MAX_SUBSCRIPTIONS_PER_ACCOUNT} subscriptions; unsubscribe one first.`,
+    };
   }
-  const outcome = await activate(principal, params, {
-    id,
-    url: url.url,
-    args: args.data,
-    existing,
-  });
-  if (!outcome.ok && !existing) await store.unreserveSubscription(principal.id, id);
-  return outcome;
-}
-
-async function activate(
-  principal: Principal,
-  params: SubscribeParams,
-  ctx: {
-    id: string;
-    url: string;
-    args: SubscriptionRecord["arguments"];
-    existing: SubscriptionRecord | null;
-  },
-): Promise<SubscribeOutcome> {
-  const { store, callbackFetch, now } = getDeps();
-  const { id, args, existing } = ctx;
-  const secret = params.delivery.secret;
 
   const verifiedKey = digest([principal.id, params.delivery.url]);
   if (!(await store.isCallbackVerified(verifiedKey))) {
@@ -148,7 +145,7 @@ async function activate(
     await store.markCallbackVerified(verifiedKey);
   }
 
-  if (!args.sources || args.sources.includes("hevy")) {
+  if (wantsHevy({ arguments: args })) {
     // Every subscribe and refresh re-checks the registration, so a webhook
     // removed on Hevy's side comes back within one refresh.
     const webhook = await ensureHevyWebhook(principal);
@@ -168,13 +165,13 @@ async function activate(
     createdAt: existing?.createdAt ?? at,
     expiresAt,
   };
-  // Redis keeps the credentials as long as the account's longest-lived
-  // subscription (the store only ever extends their expiry). The sealed copy
-  // is valid for the maximum so it never expires first.
+  // The newest credentials serve every subscription on the account, for as
+  // long as the longest-lived one.
+  const credentialsUntil = Math.max(expiresAt, ...others.map((s) => s.expiresAt));
   await store.putCredentials(
     principal.id,
-    await sealCredentials(principal.credentials, at + MAX_TTL_MS, at),
-    expiresAt,
+    await sealCredentials(principal.credentials, credentialsUntil, at),
+    credentialsUntil,
   );
   await store.putSubscription(record);
 
@@ -205,35 +202,37 @@ function nextSecrets(
   ];
 }
 
-function wantsHevy(s: SubscriptionRecord): boolean {
+function wantsHevy(s: Pick<SubscriptionRecord, "arguments">): boolean {
   return !s.arguments.sources || s.arguments.sources.includes("hevy");
 }
 
-export async function unsubscribe(principal: Principal, params: UnsubscribeParams) {
+export async function unsubscribe(
+  principal: Principal,
+  params: UnsubscribeParams,
+): Promise<{ ok: true } | RpcFailure> {
   const { store } = getDeps();
   const id = subscriptionId(principal, params.delivery.url, params.name, params.arguments);
-  const existing = await store.getSubscription(id);
-  // A subscription id only matches when it was created by this principal, so
-  // there is nothing else to authorize.
-  if (!existing) return {};
-  await store.deleteSubscription(existing);
+  const locked = await store.withAccountLock(principal.id, async () => {
+    const existing = await store.getSubscription(id);
+    // A subscription id only matches when it was created by this principal,
+    // so there is nothing else to authorize.
+    if (!existing) return;
+    await store.deleteSubscription(existing);
 
-  // Clean up what only subscriptions need: the account's credentials, and the
-  // Hevy account's single webhook slot. A subscribe still in flight holds a
-  // reservation but no record yet, so it counts as in use. Leaving either
-  // behind is harmless: credentials expire, and every subscribe re-checks the
-  // webhook.
-  const { reserved, live } = await store.accountSubscriptions(principal.id);
-  if (reserved === 0) {
-    await store.deleteCredentials(principal.id);
-  }
-  const pending = reserved > live.length;
-  if (wantsHevy(existing) && !pending) {
-    const hevySubs = await store.listSubscriptions({
-      kind: "hevy",
-      hevyUserId: principal.identity.hevyUserId,
+    // Clean up what only subscriptions need: the account's credentials, and
+    // the Hevy account's single webhook slot.
+    const remaining = await store.listSubscriptions({
+      kind: "principal",
+      principalId: principal.id,
     });
-    if (!hevySubs.some(wantsHevy)) await releaseHevyWebhook(principal).catch(() => undefined);
-  }
-  return {};
+    if (remaining.length === 0) await store.deleteCredentials(principal.id);
+    if (wantsHevy(existing)) {
+      const hevySubs = await store.listSubscriptions({
+        kind: "hevy",
+        hevyUserId: principal.identity.hevyUserId,
+      });
+      if (!hevySubs.some(wantsHevy)) await releaseHevyWebhook(principal).catch(() => undefined);
+    }
+  });
+  return locked ? { ok: true } : busy();
 }

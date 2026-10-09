@@ -148,7 +148,11 @@ function registerEvents(server: McpServer, principal: Principal) {
   server.server.setRequestHandler(
     "events/unsubscribe",
     { params: UnsubscribeParamsSchema, result: z.looseObject({}) },
-    async (params) => unsubscribe(principal, params),
+    async (params) => {
+      const outcome = await unsubscribe(principal, params);
+      if (!outcome.ok) throw new ProtocolError(outcome.code, outcome.message, outcome.data);
+      return {};
+    },
   );
 }
 

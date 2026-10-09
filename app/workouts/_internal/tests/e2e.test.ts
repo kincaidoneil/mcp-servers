@@ -828,49 +828,114 @@ describe("/workouts MCP events, end to end", () => {
     expect(await store.getCredentials(`${HEVY_USER}:i651018`)).toBeNull();
   });
 
-  it("keeps the store consistent when subscribes race", async () => {
-    // Two requests for the same subscription: the loser's failure must not
-    // remove the winner's slot.
+  it("serializes subscription changes on one account", async () => {
+    const token = await connect();
     const principalId = `${HEVY_USER}:i651018`;
-    expect(await store.reserveSubscription(principalId, "sub_same", 10)).toBe(true);
-    expect(await store.reserveSubscription(principalId, "sub_same", 10)).toBe(true);
-    await store.putSubscription({
-      id: "sub_same",
-      principalId,
-      hevyUserId: HEVY_USER,
-      intervalsAthleteId: "i651018",
-      arguments: {},
-      url: RECEIVER,
-      secrets: [{ secret: secret(), retiresAt: null }],
-      createdAt: clock,
-      expiresAt: clock + 3600_000,
-    });
-    await store.unreserveSubscription(principalId, "sub_same");
+    const params = (url: string, extra: Record<string, unknown> = {}) => {
+      const s = secret();
+      receiverSecrets.set(url, [s]);
+      return { ...subscribeParams(url, s), ...extra };
+    };
+    // The same subscription three times at once is one subscription.
+    const same = params(RECEIVER);
+    const triple = await Promise.all([1, 2, 3].map(() => rpc(token, "events/subscribe", same)));
+    expect(new Set(triple.map((r) => r.json.result?.id)).size).toBe(1);
     expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(1);
 
-    // A short subscription written after a long one never shortens the
+    // A short subscription written alongside a long one never shortens the
     // account's credentials.
-    await store.putCredentials(principalId, "sealed-long", clock + 30 * 24 * 3600_000);
-    await store.putCredentials(principalId, "sealed-short", clock + 3600_000);
+    await Promise.all([
+      rpc(token, "events/subscribe", params("https://receiver.example.com/long")),
+      rpc(
+        token,
+        "events/subscribe",
+        params("https://receiver.example.com/short", { ttlMs: 3600_000 }),
+      ),
+    ]);
     clock += 2 * 3600_000;
-    expect(await store.getCredentials(principalId)).toBe("sealed-short");
+    expect(await store.getCredentials(principalId)).not.toBeNull();
+
+    // Unsubscribing the last subscription while a replacement subscribes
+    // leaves the replacement with credentials and the Hevy webhook.
+    for (const url of [RECEIVER, "https://receiver.example.com/long"]) {
+      // oxlint-disable-next-line no-await-in-loop -- clearing down to none
+      await rpc(token, "events/unsubscribe", {
+        name: "workout.completed",
+        arguments: {},
+        delivery: { mode: "webhook", url },
+      });
+    }
+    expect(await store.listSubscriptions({ kind: "principal", principalId })).toHaveLength(0);
+    await Promise.all([
+      rpc(token, "events/subscribe", params("https://receiver.example.com/replacement")),
+      rpc(token, "events/unsubscribe", {
+        name: "workout.completed",
+        arguments: {},
+        delivery: { mode: "webhook", url: RECEIVER },
+      }),
+    ]);
+    expect(await store.getCredentials(principalId)).not.toBeNull();
+    expect(hevyWebhook).not.toBeNull();
   });
 
-  it("keeps credentials and the Hevy webhook for a subscribe still in flight", async () => {
+  it("drops queued retries from an earlier subscription lifetime", async () => {
     const token = await connect();
     const signing = secret();
     receiverSecrets.set(RECEIVER, [signing]);
-    await rpc(token, "events/subscribe", subscribeParams(RECEIVER, signing));
-    // A replacement subscribe has reserved its slot but not written its record.
-    const principalId = `${HEVY_USER}:i651018`;
-    expect(await store.reserveSubscription(principalId, "sub_in_flight", 10)).toBe(true);
+    const params = subscribeParams(RECEIVER, signing);
+    await rpc(token, "events/subscribe", params);
+    receiverStatus = 503;
+    expect(await hevyWebhookCall("f1085cdb-32b2-4003-967d-53a3af8eaecb")).toBe(200);
+    receiverStatus = 200;
+    // Unsubscribe and resubscribe with the same identity before the retry.
     await rpc(token, "events/unsubscribe", {
       name: "workout.completed",
       arguments: {},
       delivery: { mode: "webhook", url: RECEIVER },
     });
-    expect(await store.getCredentials(principalId)).not.toBeNull();
-    expect(hevyWebhook).not.toBeNull();
+    clock += 1000;
+    await rpc(token, "events/subscribe", params);
+    received = [];
+    clock += 5 * 60_000;
+    await tick();
+    expect(events()).toHaveLength(0);
+  });
+
+  it("re-evaluates handled activities when the set of subscriptions changes", async () => {
+    const token = await connect();
+    const signing = secret();
+    receiverSecrets.set(RECEIVER, [signing]);
+    await rpc(
+      token,
+      "events/subscribe",
+      subscribeParams(RECEIVER, signing, { sources: ["intervals"] }),
+    );
+    const subscribedAt = clock;
+    clock += 60 * 60_000;
+    activities.push(activity("i900", new Date(clock).toISOString()));
+    clock += 20 * 60_000;
+    await tick();
+    // A subscription that existed before i900 but was missing from that poll's
+    // snapshot (it finished subscribing mid-poll) must still receive it.
+    const RUNS = "https://receiver.example.com/mcp-events/cb_runs";
+    const runsSecret = secret();
+    receiverSecrets.set(RUNS, [runsSecret]);
+    await store.putSubscription({
+      id: "sub_mid_poll",
+      principalId: `${HEVY_USER}:i651018`,
+      hevyUserId: HEVY_USER,
+      intervalsAthleteId: "i651018",
+      arguments: { sources: ["intervals"] },
+      url: RUNS,
+      secrets: [{ secret: runsSecret, retiresAt: null }],
+      createdAt: subscribedAt + 1,
+      expiresAt: clock + 24 * 3600_000,
+    });
+    received = [];
+    await tick();
+    expect(events().map((e) => [e.url, (e.body as unknown as McpEvent).eventId])).toEqual([
+      [RUNS, "intervals_i900"],
+    ]);
   });
 
   it("serves tools to the model", async () => {

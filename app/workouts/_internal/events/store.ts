@@ -3,6 +3,7 @@
 // per-subscription dedupe claims, and which Intervals activities polling has
 // already handled.
 
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { decryptJwe, encryptJwe } from "@/lib/oauth-as";
 import { getConfig } from "../config";
@@ -15,6 +16,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Longer than any window in which the same workout could be seen again.
 const CLAIM_MS = 30 * DAY_MS;
 const ITEM_MS = 3 * DAY_MS;
+// The lock outlives the slowest subscribe (verification 10 s, four Hevy calls
+// at 10 s each); waiters give up after LOCK_WAIT_MS.
+const LOCK_MS = 120_000;
+const LOCK_WAIT_MS = 60_000;
 
 const SubscriptionRecordSchema = z.object({
   id: z.string(),
@@ -39,12 +44,16 @@ export type SubscriptionIndex =
 const OutboxItemSchema = z.object({
   event: z.custom<McpEvent>((v) => typeof v === "object" && v !== null),
   attempts: z.number(),
+  // createdAt of the subscription it was queued for. A subscription id is
+  // reused when a client resubscribes, so delivery checks this to drop items
+  // left over from an earlier lifetime.
+  subscriptionCreatedAt: z.number(),
 });
 export type OutboxItem = z.infer<typeof OutboxItemSchema>;
 
 const key = {
   sub: (id: string) => `wk:sub:${id}`,
-  reserved: (id: string) => `wk:reserved:${id}`,
+  lock: (principalId: string) => `wk:lock:${principalId}`,
   index: (index: SubscriptionIndex) => {
     switch (index.kind) {
       case "all":
@@ -63,7 +72,8 @@ const key = {
   outbox: "wk:outbox",
   outboxItem: (member: string) => `wk:outbox:item:${member}`,
   lease: (member: string) => `wk:lease:${member}`,
-  handled: (principalId: string) => `wk:intervals:handled:${principalId}`,
+  handled: (principalId: string, subscriptions: string) =>
+    `wk:intervals:handled:${principalId}:${subscriptions}`,
 };
 
 function indexesOf(record: SubscriptionRecord): SubscriptionIndex[] {
@@ -85,6 +95,10 @@ function parse<T>(schema: z.ZodType<T>, raw: string | null): T | null {
   }
 }
 
+function digestIds(ids: string[]): string {
+  return createHash("sha256").update(ids.toSorted().join(",")).digest("base64url").slice(0, 16);
+}
+
 export function outboxMember(subscriptionId: string, eventId: string): string {
   return `${subscriptionId} ${eventId}`;
 }
@@ -98,16 +112,13 @@ export function createStore(kv: Kv, now: () => number) {
   }
 
   // Live subscriptions in an index. Ids whose record is gone from Redis are
-  // pruned, except in the per-account index: there an id may be reserved by
-  // a subscribe still in flight, and reserveSubscription prunes atomically.
+  // pruned; expired-but-present ones are skipped.
   async function listSubscriptions(index: SubscriptionIndex): Promise<SubscriptionRecord[]> {
     const ids = await kv.smembers(key.index(index));
     const raws = await Promise.all(ids.map((id) => kv.get(key.sub(id))));
-    if (index.kind !== "principal") {
-      await Promise.all(
-        ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
-      );
-    }
+    await Promise.all(
+      ids.map((id, i) => (raws[i] === null ? kv.srem(key.index(index), id) : null)),
+    );
     return raws
       .map((raw) => parse(SubscriptionRecordSchema, raw))
       .filter((r): r is SubscriptionRecord => r !== null && r.expiresAt > now());
@@ -130,44 +141,34 @@ export function createStore(kv: Kv, now: () => number) {
 
     listSubscriptions,
 
-    // Reserve a place in the account's index before the slow parts of
-    // subscribing (verification, the Hevy webhook), so concurrent requests
-    // cannot overshoot the cap. Unreserve if subscribing then fails.
-    async reserveSubscription(principalId: string, id: string, max: number) {
-      return kv.reserve({
-        setKey: key.index({ kind: "principal", principalId }),
-        member: id,
-        max,
-        recordPrefix: key.sub(""),
-        markerPrefix: key.reserved(""),
-        // Longer than the slowest subscribe: verification (10 s) plus up to four
-        // Hevy calls (10 s each).
-        markerPx: 120_000,
-      });
-    },
-    // The account's slots in use (live or being created) and its live
-    // subscriptions. More slots than live ones means a subscribe in flight.
-    async accountSubscriptions(principalId: string) {
-      const index: SubscriptionIndex = { kind: "principal", principalId };
-      const [reserved, live] = await Promise.all([
-        kv.smembers(key.index(index)),
-        listSubscriptions(index),
-      ]);
-      return { reserved: reserved.length, live };
-    },
-    async unreserveSubscription(principalId: string, id: string) {
-      await kv.unreserve({
-        setKey: key.index({ kind: "principal", principalId }),
-        member: id,
-        recordKey: key.sub(id),
-      });
+    // Run fn while holding the account's lock. Subscribe and unsubscribe take
+    // it, so their check-then-write steps (the cap, credential lifetime,
+    // cleanup) never interleave. They are rare, so waiting costs nothing.
+    // Returns null if the lock stays busy past LOCK_WAIT_MS.
+    async withAccountLock<T>(
+      principalId: string,
+      fn: () => Promise<T>,
+    ): Promise<{ value: T } | null> {
+      const token = randomUUID();
+      // Real time, not the injectable clock: this is a wait, not a timestamp.
+      const deadline = Date.now() + LOCK_WAIT_MS;
+      // oxlint-disable-next-line no-await-in-loop -- polling for the lock
+      while (!(await kv.set(key.lock(principalId), token, { px: LOCK_MS, nx: true }))) {
+        if (Date.now() > deadline) return null;
+        // oxlint-disable-next-line no-await-in-loop -- polling for the lock
+        await new Promise((resolve) => setTimeout(resolve, 25 + Math.random() * 50));
+      }
+      try {
+        return { value: await fn() };
+      } finally {
+        await kv.delIfEquals(key.lock(principalId), token);
+      }
     },
 
     // One credential record per account, replaced on every subscribe and
-    // refresh so the newest key is the one used. Its expiry only grows, so
-    // concurrent subscribes can't cut it below the longest subscription.
+    // refresh so the newest key is the one used, living as long as `until`.
     async putCredentials(principalId: string, sealed: string, until: number) {
-      await kv.setExtending(key.credentials(principalId), sealed, Math.max(until - now(), 1));
+      await kv.set(key.credentials(principalId), sealed, { px: Math.max(until - now(), 1) });
     },
     async deleteCredentials(principalId: string) {
       await kv.del(key.credentials(principalId));
@@ -185,11 +186,11 @@ export function createStore(kv: Kv, now: () => number) {
 
     // Queue an event for one subscription unless it was queued before.
     // Returns the outbox member when newly queued.
-    async enqueueOnce(subscriptionId: string, event: McpEvent): Promise<string | null> {
-      const member = outboxMember(subscriptionId, event.eventId);
-      const item: OutboxItem = { event, attempts: 0 };
+    async enqueueOnce(sub: SubscriptionRecord, event: McpEvent): Promise<string | null> {
+      const member = outboxMember(sub.id, event.eventId);
+      const item: OutboxItem = { event, attempts: 0, subscriptionCreatedAt: sub.createdAt };
       const taken = await kv.enqueueOnce({
-        claimKey: key.claim(subscriptionId, event.eventId),
+        claimKey: key.claim(sub.id, event.eventId),
         claimPx: CLAIM_MS,
         itemKey: key.outboxItem(member),
         item: JSON.stringify(item),
@@ -228,14 +229,20 @@ export function createStore(kv: Kv, now: () => number) {
     },
 
     // Activities polling has finished with, so each tick fetches details only
-    // for new ones. Correctness does not depend on it: claims dedupe.
-    // Per account, not per athlete: two accounts sharing an athlete must not
-    // mark each other's activities done.
-    async getHandledActivities(principalId: string): Promise<Set<string>> {
-      return new Set(parse(z.array(z.string()), await kv.get(key.handled(principalId))) ?? []);
+    // for new ones. Keyed by the exact set of subscriptions polled, so a
+    // subscription added since starts from a clean slate (claims keep the
+    // existing ones from receiving anything twice).
+    async getHandledActivities(
+      principalId: string,
+      subscriptionIds: string[],
+    ): Promise<Set<string>> {
+      const raw = await kv.get(key.handled(principalId, digestIds(subscriptionIds)));
+      return new Set(parse(z.array(z.string()), raw) ?? []);
     },
-    async setHandledActivities(principalId: string, ids: string[]) {
-      await kv.set(key.handled(principalId), JSON.stringify(ids), { px: 14 * DAY_MS });
+    async setHandledActivities(principalId: string, subscriptionIds: string[], ids: string[]) {
+      await kv.set(key.handled(principalId, digestIds(subscriptionIds)), JSON.stringify(ids), {
+        px: 14 * DAY_MS,
+      });
     },
   };
 }

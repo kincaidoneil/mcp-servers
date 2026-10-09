@@ -35,7 +35,7 @@ export async function emit(
   const { store, now } = getDeps();
   if (createdAt < now() - MAX_WORKOUT_AGE_MS) return [];
   const queued = await Promise.all(
-    subs.filter((s) => wantsEvent(s, event, createdAt)).map((s) => store.enqueueOnce(s.id, event)),
+    subs.filter((s) => wantsEvent(s, event, createdAt)).map((s) => store.enqueueOnce(s, event)),
   );
   return queued.filter((m): m is string => m !== null);
 }
@@ -57,7 +57,9 @@ export async function deliver(member: string): Promise<DeliveryResult> {
     const item = await store.getOutboxItem(member);
     const subscriptionId = member.split(" ")[0] ?? "";
     const sub = item ? await store.getSubscription(subscriptionId) : null;
-    if (!item || !sub) {
+    // An item from before the subscription last restarted (unsubscribe, then
+    // resubscribe with the same id) belongs to the old lifetime: drop it.
+    if (!item || !sub || sub.createdAt !== item.subscriptionCreatedAt) {
       await store.removeOutbox(member);
       return "subscription_gone";
     }
