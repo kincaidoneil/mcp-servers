@@ -352,7 +352,7 @@ async function hevyWebhookCall(workoutId: string, auth = hevyWebhookToken(HEVY_U
     new Request(hevyWebhookUrl(HEVY_USER), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ id: "00000000-0000-0000-0000-000000000001", payload: { workoutId } }),
+      body: JSON.stringify({ workoutId }),
     }),
   );
   await deliverAll(result.followUp);

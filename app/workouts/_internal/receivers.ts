@@ -34,7 +34,8 @@ function sameSecret(expected: string, actual: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const HevyWebhookSchema = z.object({ payload: z.object({ workoutId: z.string().min(1) }) });
+// The shape Hevy actually sends, observed live: a flat {workoutId}.
+const HevyWebhookSchema = z.object({ workoutId: z.string().min(1) });
 
 export async function receiveHevyWebhook(req: Request): Promise<Received> {
   const user = new URL(req.url).searchParams.get("user");
@@ -42,9 +43,9 @@ export async function receiveHevyWebhook(req: Request): Promise<Received> {
     return status(401, "unauthorized");
   }
   const body = HevyWebhookSchema.safeParse(await req.json().catch(() => null));
-  if (!body.success) return status(400, "expected {payload: {workoutId}}");
+  if (!body.success) return status(400, "expected {workoutId}");
 
-  const result = await ingestHevyWorkout(user, body.data.payload.workoutId);
+  const result = await ingestHevyWorkout(user, body.data.workoutId);
   // 503 asks Hevy to redeliver. Whatever was queued still goes out now, and
   // claims keep the redelivery from queueing it twice.
   return result.retry ? status(503, "retry later", result.queued) : ok(result.queued);
