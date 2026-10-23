@@ -491,3 +491,10 @@ export type UserInfo = z.infer<typeof UserInfoSchema>;
 
 // POST /v1/body_measurements returns an empty body on success.
 export const EmptyResponseSchema = z.unknown();
+
+// GET /v1/webhook-subscription. Not in Hevy's published OpenAPI document, but
+// live and described in the spec Hevy ships to SDK authors.
+export const WebhookSubscriptionSchema = z.object({
+  url: z.string(),
+  auth_token: z.string().nullish(),
+});
