@@ -59,6 +59,35 @@ Hevy has no OAuth; its API uses a static per-user key ([Hevy Pro](https://hevy.c
 
 2. **Connect the MCP.** Add `<PUBLIC_BASE_URL>/hevy` to the agent. On the consent screen, paste your API key from [Hevy settings → Developer](https://hevy.com/settings?developer).
 
+## Pare
+
+Card-stack triage for the decisions an agent should not make alone: which newsletters to unsubscribe from, which tasks to drop, which files to archive. The agent opens a session with the items, the user works through them one card at a time in an [MCP App](https://github.com/modelcontextprotocol/ext-apps) inside the chat, and the decisions come back as a message with item ids and notes.
+
+| Tool         | Description                                                                                 |
+| :----------- | :------------------------------------------------------------------------------------------ |
+| `pare-start` | Open a session in the app from a list of items and per-session action labels, or reopen one |
+
+Every session has two primary actions with fixed ids, `keep` (right) and `dispose` (left), whose labels the agent sets per task ("Stay subscribed" / "Unsubscribe"), plus up to four extra actions for a third bucket (Snooze, Delegate). A label is all the agent sets: tooltips name the keyboard key and never carry session text, so a control reads the same everywhere. Each card carries a title, a subtitle for the source, a plain-text body, label/value facts, tags, a link, and the agent's suggestion with a reason.
+
+In the app the question is yes, no, or comment: `→` or `Enter` keeps, `←` disposes, and typing writes a note into the always-focused field under the card. `1` to `4` pick extra actions, `↓` moves the card to the bottom of the deck, `⌘Z` undoes; with text in the note, `⌘` plus the same keys. The agent's suggestion is a blue sparkle beside the action it points at, never a key; blue marks the model's opinion and nothing else. Cards never expand: a body is at most four lines, so a hard case gets a note or a deferral rather than more reading. Every control names its key on hover. Pushing a card lights that side of the table, and so does deciding from the keyboard. A mouse drag commits on release, since a pointer reports its own. A trackpad never does, so the deck sits in a scroll container with three snap points, left, centre and right: the browser owns the gesture, holds the card wherever the fingers are, and lands on a side only once they lift. Landing there is the decision, and landing back in the centre is not.
+
+The server holds nothing. After every decision the app updates the model's context with the whole list so far (quietly, without triggering a reply) and caches the session in browser storage, so a re-render of the conversation picks up where the user stopped. The summary screen sends the full list to the chat as a message. To continue in a later conversation, the agent calls `pare-start` again with the same items, the `session_id`, and the decisions from its context.
+
+#### Setup
+
+Add `<PUBLIC_BASE_URL>/pare` to the agent. No credentials, no environment variables. Claude.ai, Claude Desktop, and ChatGPT render MCP Apps.
+
+#### Developing the UI
+
+The app is a React single-file build under [`app/pare/_internal/ui/`](./app/pare/_internal/ui/), served by the MCP server as the resource `ui://pare/app.html`.
+
+```bash
+pnpm ui:dev     # harness at localhost:5173/harness.html: a stand-in host with fixtures, theme toggle, and what the model would see
+pnpm ui:build   # writes app/pare/_internal/ui/dist/index.html (pnpm build runs this first)
+pnpm test:e2e   # Playwright against the harness, using the built file the way a real host does
+pnpm smoke:pare # the tool and the resource over HTTP against a running server
+```
+
 ## Architecture
 
 ```mermaid
@@ -69,12 +98,13 @@ flowchart LR
     hevy["Hevy"]
 
     client -->|"DCR · OAuth 2.1 · PKCE"| bridge
+    client <-->|"pare app · MCP Apps, no auth"| bridge
     bridge -->|"upstream OAuth"| notion
     notion -.->|"allowlist check on callback"| bridge
     bridge -->|"API-key validation"| hevy
 ```
 
-Each service's endpoint is its own OAuth authorization server (shared code in [`lib/oauth-as/`](./lib/oauth-as/)): it issues the tokens clients use and handles the upstream credential underneath. For providers with OAuth (Notion), it brokers the upstream flow; for API-key providers (Hevy), the consent screen collects and validates the key instead.
+Each credentialed service's endpoint is its own OAuth authorization server (shared code in [`lib/oauth-as/`](./lib/oauth-as/)): it issues the tokens clients use and handles the upstream credential underneath. For providers with OAuth (Notion), it brokers the upstream flow; for API-key providers (Hevy), the consent screen collects and validates the key instead. Pare touches no upstream and no user data, so it has no auth.
 
 It holds no state: auth codes and access/refresh tokens are self-contained [`jose`](https://github.com/panva/jose) JWTs, so the server needs no database or key-value store. To revoke all issued tokens, rotate `JWT_SIGNING_KEY`.
 
@@ -95,7 +125,7 @@ cp .env.example .env   # fill in
 pnpm dev               # localhost:3000/notion
 ```
 
-`pnpm test` (vitest), `typecheck`, `lint` (oxlint), `format` (oxfmt), `build`
+`pnpm test` (vitest), `test:e2e` (Playwright, pare UI), `typecheck`, `lint` (oxlint), `format` (oxfmt), `build`
 
 Drive OAuth locally with `@modelcontextprotocol/inspector`. Notion needs an HTTPS redirect URI, so use ngrok or a preview deploy for the full handshake. Hevy has no upstream redirect, so its full flow works on plain localhost.
 
