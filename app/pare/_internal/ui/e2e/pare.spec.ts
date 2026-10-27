@@ -318,3 +318,27 @@ test("a note waits with the item it was written about", async ({ page }) => {
   await expect(top(app)).toHaveAttribute("data-item-id", "nl-1");
   await expect(app.getByTestId("note")).toHaveValue("only the Sunday edition");
 });
+
+test("the note grows with its text, stops growing, and shrinks when the card goes", async ({
+  page,
+}) => {
+  const app = await open(page);
+  const note = app.getByTestId("note");
+  const height = async () => (await note.boundingBox())?.height ?? 0;
+  const resting = await height();
+
+  await note.fill("one\ntwo\nthree");
+  const grown = await height();
+  expect(grown).toBeGreaterThan(resting * 1.8);
+
+  // Past about six lines it scrolls instead of growing.
+  await note.fill(Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n"));
+  const capped = await height();
+  expect(capped).toBeGreaterThan(grown);
+  expect(capped).toBeLessThanOrEqual(160);
+
+  // Deciding the card clears the note, and the field is one line again.
+  await page.keyboard.press("Control+ArrowRight");
+  await expect(note).toHaveValue("");
+  expect(await height()).toBe(resting);
+});

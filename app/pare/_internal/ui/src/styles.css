@@ -688,7 +688,10 @@ a {
   display: block;
   width: 100%;
   resize: none;
-  height: 44px;
+  /* One line at rest; NoteField sets the height to fit the text, up to about
+   * six lines, after which it scrolls. */
+  min-height: 44px;
+  max-height: 158px;
   overflow-y: auto;
   padding: 10px 14px;
   border: 0;
