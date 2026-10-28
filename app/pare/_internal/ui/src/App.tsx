@@ -29,6 +29,11 @@ import { Summary } from "./components/Summary";
 
 const CONTEXT_DELAY = 250;
 
+// EXPERIMENT (pare-app-tools-test): the session as of the last change, for the
+// get_decisions app tool. App-provided tools are in the draft MCP Apps spec
+// only; this branch exists to find out whether Claude.ai calls them.
+let latestSession: Session | null = null;
+
 type ToolResult = { ok: true; sessionId: string } | { ok: false; message: string };
 
 export function App() {
@@ -39,8 +44,31 @@ export function App() {
 
   const { app, isConnected, error } = useApp({
     appInfo: { name: "pare", version: "0.2.0" },
-    capabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+    capabilities: { availableDisplayModes: ["inline", "fullscreen"], tools: {} },
     onAppCreated(created) {
+      created.registerTool(
+        "get_decisions",
+        {
+          title: "Get pare decisions",
+          description:
+            "Read what the user has decided so far in the open pare session: each item's id and action, with any note. Call this when the user asks about their progress or decisions before they have sent the results.",
+          annotations: { readOnlyHint: true },
+        },
+        () => {
+          console.info("[pare] get_decisions called by the host");
+          if (!latestSession) {
+            return {
+              content: [{ type: "text", text: "No pare session is open yet." }],
+              isError: true,
+            };
+          }
+          const update = contextUpdate(latestSession);
+          return {
+            content: [{ type: "text", text: update.text }],
+            structuredContent: update.structured,
+          };
+        },
+      );
       created.ontoolinput = ({ arguments: args }) => setToolInput(args ?? {});
       created.ontoolresult = (result) => {
         if (result.isError) {
@@ -72,6 +100,8 @@ export function App() {
 
   useEffect(() => {
     if (!app || !isConnected) return;
+    // EXPERIMENT: what the host says it supports, for reading in devtools.
+    console.info("[pare] host", app.getHostVersion(), app.getHostCapabilities());
     const ctx = app.getHostContext();
     applyDocumentTheme(
       ctx?.theme ?? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
@@ -158,6 +188,7 @@ function Triage({ host, initial, displayMode, onDisplayMode, safeBottom }: Triag
   // shortly after (debounced so a fast run of keypresses sends one update).
 
   const pushContext = useCallback(() => {
+    latestSession = stateRef.current.session;
     const update = contextUpdate(stateRef.current.session);
     return host.updateModelContext(update.text, update.structured);
   }, [host]);

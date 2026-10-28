@@ -93,6 +93,8 @@ export function Harness() {
       },
     );
     bridge.current = host;
+    // EXPERIMENT (pare-app-tools-test): let a test call the app's own tools.
+    (window as Window & { pareBridge?: AppBridge }).pareBridge = host;
 
     host.oncalltool = async (request) => {
       pushLog({ kind: "tool", text: `${request.name} ${JSON.stringify(request.arguments)}` });
