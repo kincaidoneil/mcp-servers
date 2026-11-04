@@ -21,15 +21,13 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  // Consent screens handle secrets (the Hevy bridge collects an API key), so
-  // lock down framing, referrers, and caching on every bridge's oauth pages.
+  // Consent screens can carry secrets, so lock down framing, referrers, and
+  // caching on every bridge's oauth pages.
   //
-  // No form-action directive: the Hevy consent form POSTs to /oauth/submit,
-  // which 303-redirects to the client's registered callback (e.g. claude.ai).
-  // Chrome applies form-action to a form submission's redirect target, so
-  // `form-action 'self'` blocks that cross-origin hop and breaks the flow. The
-  // redirect target is instead validated server-side against the client's
-  // registered redirect_uris, and the API key only ever POSTs same-origin.
+  // No form-action directive: Chrome applies form-action to a form
+  // submission's redirect target, so `form-action 'self'` would break a
+  // consent form that 303-redirects to the client's registered callback
+  // (e.g. claude.ai).
   async headers() {
     return [
       {
