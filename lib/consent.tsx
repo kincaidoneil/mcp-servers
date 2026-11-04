@@ -1,6 +1,6 @@
 // Shared pieces of the consent (authorize) pages. Each bridge renders its own
-// action area — Notion links to upstream OAuth, Hevy collects an API key —
-// inside the same shell, with the same request validation in front.
+// action area (Notion links to upstream OAuth) inside the same shell, with the
+// same request validation in front.
 
 import { getDomain } from "tldts";
 import { validateAuthorize } from "./oauth-as";

@@ -42,7 +42,7 @@ interface MaybeAuthInfo {
 }
 
 // Pull the upstream credential out of a tool handler's `extra` argument.
-// `label` names the credential in the failure message (e.g. "Hevy API key").
+// `label` names the credential in the failure message (e.g. "Notion access token").
 export function extractUpstreamToken(extra: unknown, label: string): string {
   const authInfo = (extra as MaybeAuthInfo).authInfo;
   const token = authInfo?.extra?.upstreamAccessToken;
